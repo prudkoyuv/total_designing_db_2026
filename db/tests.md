@@ -9,7 +9,7 @@
 | Параметр | Значение |
 |---|---|
 | PostgreSQL version | `PostgreSQL 18.4 (Debian 18.4-1.pgdg12+1) on x86_64-pc-linux-gnu` |
-| Дата проверки | 2026-11-07 |
+| Дата проверки | 2026-11-11 |
 | Схема | `prudko_food` |
 | Роль-аудитор | `inspector` |
 
