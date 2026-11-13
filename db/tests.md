@@ -2,7 +2,7 @@
 
 Все проверки выполнены реально, под ролью `inspector`, на PostgreSQL 18.4.
 Основная база — `foodexpress_v2`; протокол восстановления отдельно прогнан на
-чистой базе `foodexpress_restore`, собранной из итогового бэкапа.
+чистой базе `foodexpress_restore2`, собранной из итогового бэкапа.
 
 ## Окружение
 
@@ -23,18 +23,31 @@
 
 Ожидается: без ошибок.
 
-Факт: чистая БД `foodexpress_restore` создана, в ней заранее созданы `exts` и
-`uuid-ossp` (BR-13.3), затем выполнено:
+Факт: чистая БД `foodexpress_restore2` создана, в ней заранее созданы `exts`
+и `uuid-ossp` (BR-13.3), затем выполнено:
 
 ```
-pg_restore --no-owner --no-privileges --exit-on-error -d foodexpress_restore foodexpress_prudko.backup
-psql -d foodexpress_restore -f grants.sql
+pg_restore --exit-on-error -d foodexpress_restore2 foodexpress_prudko.backup
+psql -d foodexpress_restore2 -f grants.sql
 ```
 
-Оба шага завершились без ошибок. Бэкап содержит только схему `prudko_food`
-(12 таблиц, 8 enum-типов, 16 FK, функции, процедуры, представление и данные);
-`exts`, роль `inspector` и сама база в бэкап не входят — они создаются
-`grants.sql` / подготовлены заранее.
+Оба шага завершились без ошибок. Обратите внимание: `pg_restore` запущен
+**без** `--no-owner` — это проверка того, что архив не зависит от роли
+разработчика. Владельцем объектов схемы является предопределённая роль
+`pg_database_owner` (существует в PostgreSQL 14+ и не требует создания в
+целевой БД), поэтому команды `ALTER ... OWNER TO` из архива выполняются на
+любом кластере. Роли `admin` в бэкапе нет: `grep -c 'OWNER TO admin'` по
+`pg_restore -f -` даёт 0, `OWNER TO pg_database_owner` — 34.
+
+Почему именно так: custom-формат (`-Fc`) хранит владельца в TOC архива, а
+`pg_dump -O` отключает владельца только для plain-text (это написано в
+`pg_dump --help`). Поэтому вместо привязки к `admin` владение заранее
+переведено на `pg_database_owner`; восстановление проходит и без
+`--no-owner`, и с ним.
+
+Бэкап содержит только схему `prudko_food` (12 таблиц, 8 enum-типов, 16 FK,
+функции, процедуры, представление и данные); `exts`, роль `inspector` и сама
+база в бэкап не входят — они создаются `grants.sql` / подготовлены заранее.
 
 Вердикт: OK.
 
@@ -900,6 +913,7 @@ SQL-функции снаружи не раскрывается. В теле ф�
 | I. Повторная генерация | OK |
 
 Бэкап: `db/foodexpress_prudko.backup` (custom format, схема `prudko_food`,
-`--no-owner --no-privileges`), восстановление проверено на чистой базе
-`foodexpress_restore` с последующим `grants.sql` и полным прогоном проверок
-под `inspector`.
+владелец объектов — `pg_database_owner`, без привязки к `admin`),
+восстановление проверено на чистой базе `foodexpress_restore2` **без**
+`--no-owner` и без `--no-privileges`, с последующим `grants.sql` и полным
+прогоном проверок под `inspector`.
