@@ -68,6 +68,15 @@ SELECT count(*) AS orders_without_success_allowed
         WHERE p.order_id = o.order_id AND p.status = 'успех'
  );
 
+-- BR-7.14 («хотя бы одна позиция») обеспечивается генератором и приложением,
+-- а не схемой (см. constraints.md, 11.11). На сгенерированных данных — 0.
+SELECT count(*) AS orders_without_items
+  FROM "order" o
+ WHERE NOT EXISTS (
+       SELECT 1 FROM order_structure os
+        WHERE os.order_id = o.order_id
+ );
+
 \echo '=== 3. Осиротевшие FK ==='
 SELECT 'order_structure -> order' AS fk, count(*) AS orphans
   FROM order_structure os LEFT JOIN "order" o ON os.order_id = o.order_id WHERE o.order_id IS NULL

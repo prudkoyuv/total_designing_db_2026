@@ -26,6 +26,8 @@ DECLARE
     v_phone varchar(20);
     v_transaction varchar(100);
     v_timestamp timestamp := localtimestamp;
+    v_state text;
+    v_constraint text;
 BEGIN
     SELECT c.client_id INTO v_client FROM client c ORDER BY c.client_id LIMIT 1;
     SELECT ca.address_id INTO v_address
@@ -142,22 +144,51 @@ BEGIN
     IF NOT v_failed THEN RAISE EXCEPTION 'UNIQUE restaurant.address_id не сработал'; END IF;
 
     -- 8. CHECK courier.coefficient
+    --    middle_name обязателен (NOT NULL), иначе вставка упадёт на not-null
+    --    раньше, чем на проверяемом CHECK. Дополнительно сверяем имя
+    --    ограничения, чтобы тест не проходил на любой другой ошибке.
     v_failed := false;
+    v_state := NULL;
+    v_constraint := NULL;
     BEGIN
-        INSERT INTO courier (last_name, first_name, phone_number, status, hire_date, coefficient)
-        VALUES ('Курьер', 'Тестовый', '+70000000003', 'свободен', current_date - 10, 0.60);
-    EXCEPTION WHEN OTHERS THEN v_failed := true;
+        INSERT INTO courier (
+            last_name, first_name, middle_name,
+            phone_number, status, hire_date, coefficient
+        )
+        VALUES ('Курьер', 'Тестовый', 'Тестович',
+                '+70000000003', 'свободен', current_date - 10, 0.60);
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE,
+                                v_constraint = CONSTRAINT_NAME;
+        v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'CHECK courier.coefficient не сработал'; END IF;
+    IF v_constraint IS DISTINCT FROM 'chk_courier_coefficient' THEN
+        RAISE EXCEPTION 'CHECK courier.coefficient: ожидалось chk_courier_coefficient, получено % (SQLSTATE %)',
+            coalesce(v_constraint, '<нет>'), v_state;
+    END IF;
 
     -- 9. CHECK уволенный обязан иметь dismissal_date
     v_failed := false;
+    v_state := NULL;
+    v_constraint := NULL;
     BEGIN
-        INSERT INTO courier (last_name, first_name, phone_number, status, hire_date, dismissal_date, coefficient)
-        VALUES ('Курьер', 'Тестовый', '+70000000004', 'уволен', current_date - 10, NULL, 0.10);
-    EXCEPTION WHEN OTHERS THEN v_failed := true;
+        INSERT INTO courier (
+            last_name, first_name, middle_name,
+            phone_number, status, hire_date, dismissal_date, coefficient
+        )
+        VALUES ('Курьер', 'Тестовый', 'Тестович',
+                '+70000000004', 'уволен', current_date - 10, NULL, 0.10);
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE,
+                                v_constraint = CONSTRAINT_NAME;
+        v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'CHECK courier.dismissed_has_date не сработал'; END IF;
+    IF v_constraint IS DISTINCT FROM 'chk_courier_dismissed_has_date' THEN
+        RAISE EXCEPTION 'CHECK courier.dismissed_has_date: ожидалось chk_courier_dismissed_has_date, получено % (SQLSTATE %)',
+            coalesce(v_constraint, '<нет>'), v_state;
+    END IF;
 
     -- 10. CHECK total_amount >= 1000
     v_failed := false;
