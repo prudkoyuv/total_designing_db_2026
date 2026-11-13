@@ -1,52 +1,51 @@
 -- ============================================================================
 -- FoodExpress / FOOD-109
--- Пользователь inspector и его права. Запускать суперпользователем после
--- восстановления бэкапа (FOOD-110).
+-- Создание учётной записи аудитора inspector и выдача ей прав.
+--
+-- Принципы:
+--   * если роль уже существует, мы её НЕ изменяем: ни пароль, ни атрибуты,
+--     ни search_path. Это чужая учётная запись, и менять её без запроса
+--     нельзя;
+--   * CREATE ROLE по умолчанию создаёт NOSUPERUSER NOCREATEDB NOCREATEROLE,
+--     поэтому явно выставлять эти атрибуты не нужно;
+--   * права выдаются только на существующие объекты схемы. Права «на
+--     будущие объекты» (ALTER DEFAULT PRIVILEGES) не нужны: в BR и FOOD-109
+--     такого требования нет, а выдача доступа к ещё не созданным данным —
+--     лишний риск;
+--   * USAGE на information_schema и pg_catalog по умолчанию есть у PUBLIC,
+--     поэтому отдельные GRANT не выдаются. То, что права не отозваны,
+--     проверяется в db/tests.md (G.3, G.4).
+--
+-- Скрипт идемпотентен: его можно запускать повторно после восстановления
+-- бэкапа или пересоздания объектов.
 -- ============================================================================
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inspector') THEN
-        EXECUTE 'CREATE ROLE inspector LOGIN PASSWORD ''NetoSQL2025''';
+        CREATE ROLE inspector LOGIN PASSWORD 'NetoSQL2025';
+        RAISE NOTICE 'Роль inspector создана';
     ELSE
-        EXECUTE 'ALTER ROLE inspector WITH LOGIN PASSWORD ''NetoSQL2025''';
+        RAISE NOTICE 'Роль inspector уже существует: пароль и атрибуты не изменяются';
     END IF;
 END;
 $$;
 
-ALTER ROLE inspector NOSUPERUSER NOCREATEDB NOCREATEROLE;
-
--- Удобство проверки: можно вызывать объекты без ручного SET search_path.
-ALTER ROLE inspector SET search_path TO prudko_food, exts, public;
-
--- Права на схему приложения (USAGE + CREATE = ALL PRIVILEGES).
+-- FOOD-109: ALL PRIVILEGES на схему приложения (USAGE + CREATE).
 GRANT ALL PRIVILEGES ON SCHEMA prudko_food TO inspector;
 
--- Таблицы, представления и последовательности.
+-- FOOD-109: доступ ко всем таблицам и представлениям схемы.
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA prudko_food TO inspector;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA prudko_food TO inspector;
-GRANT SELECT ON prudko_food.how_much_money TO inspector;
 
--- Функции и процедуры.
-GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA prudko_food TO inspector;
-GRANT ALL PRIVILEGES ON ALL PROCEDURES IN SCHEMA prudko_food TO inspector;
+-- FOOD-109: вызов всех функций и процедур (ALL ROUTINES покрывает и то, и другое).
+GRANT EXECUTE ON ALL ROUTINES IN SCHEMA prudko_food TO inspector;
 
--- exts: uuid_generate_v4() (BR-13.3).
+-- FOOD-109: exts нужен для exts.uuid_generate_v4() (BR-11.1, BR-13.3).
 GRANT USAGE ON SCHEMA exts TO inspector;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA exts TO inspector;
 
--- Явно подтверждаем системные схемы (FOOD-109).
-GRANT USAGE ON SCHEMA information_schema TO inspector;
-GRANT USAGE ON SCHEMA pg_catalog TO inspector;
-
--- Права на объекты, которые могут быть созданы позже.
-ALTER DEFAULT PRIVILEGES IN SCHEMA prudko_food
-    GRANT ALL PRIVILEGES ON TABLES TO inspector;
-ALTER DEFAULT PRIVILEGES IN SCHEMA prudko_food
-    GRANT ALL PRIVILEGES ON SEQUENCES TO inspector;
-ALTER DEFAULT PRIVILEGES IN SCHEMA prudko_food
-    GRANT ALL PRIVILEGES ON FUNCTIONS TO inspector;
-
+-- FOOD-109: подключение к текущей базе (по умолчанию есть у PUBLIC,
+-- фиксируем явно, чтобы доступ не зависел от будущих изменений прав PUBLIC).
 DO $$
 BEGIN
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO inspector', current_database());

@@ -114,11 +114,12 @@ BEGIN
     BEGIN
         INSERT INTO restaurant (
             restaurant_name, address_id, description,
-            work_start, work_end, company_details
+            work_start, work_end, inn, ogrn, bank_account
         )
         VALUES (
             'Плохой график', v_foreign_address, 'Описание',
-            time '10:00', time '09:00', 'ИНН 0000000000'
+            time '10:00', time '09:00', '0000000000', '0000000000000',
+            '00000000000000000000'
         );
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
@@ -129,11 +130,12 @@ BEGIN
     BEGIN
         INSERT INTO restaurant (
             restaurant_name, address_id, description,
-            work_start, work_end, company_details
+            work_start, work_end, inn, ogrn, bank_account
         )
         VALUES (
             'Дубликат адреса', (SELECT address_id FROM restaurant WHERE restaurant_id = v_restaurant),
-            'Описание', time '09:00', time '22:00', 'ИНН 0000000000'
+            'Описание', time '09:00', time '22:00', '0000000001', '0000000000001',
+            '00000000000000000001'
         );
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
@@ -142,8 +144,8 @@ BEGIN
     -- 8. CHECK courier.coefficient
     v_failed := false;
     BEGIN
-        INSERT INTO courier (fio, phone_number, status, hire_date, coefficient)
-        VALUES ('Курьер', '+70000000003', 'свободен', current_date - 10, 0.60);
+        INSERT INTO courier (last_name, first_name, phone_number, status, hire_date, coefficient)
+        VALUES ('Курьер', 'Тестовый', '+70000000003', 'свободен', current_date - 10, 0.60);
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'CHECK courier.coefficient не сработал'; END IF;
@@ -151,8 +153,8 @@ BEGIN
     -- 9. CHECK уволенный обязан иметь dismissal_date
     v_failed := false;
     BEGIN
-        INSERT INTO courier (fio, phone_number, status, hire_date, dismissal_date, coefficient)
-        VALUES ('Курьер', '+70000000004', 'уволен', current_date - 10, NULL, 0.10);
+        INSERT INTO courier (last_name, first_name, phone_number, status, hire_date, dismissal_date, coefficient)
+        VALUES ('Курьер', 'Тестовый', '+70000000004', 'уволен', current_date - 10, NULL, 0.10);
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'CHECK courier.dismissed_has_date не сработал'; END IF;
@@ -162,9 +164,9 @@ BEGIN
     BEGIN
         INSERT INTO "order" (
             courier_id, client_id, address_id, restaurant_id,
-            order_timestamp, order_amount, status
+            order_timestamp, order_amount, status, description
         )
-        VALUES (v_courier, v_client, v_address, v_restaurant, v_timestamp, 100, 'создан');
+        VALUES (v_courier, v_client, v_address, v_restaurant, v_timestamp, 100, 'создан', 'constraint test');
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'CHECK order.min_total не сработал'; END IF;
@@ -174,11 +176,11 @@ BEGIN
     BEGIN
         INSERT INTO "order" (
             courier_id, client_id, address_id, restaurant_id,
-            order_timestamp, delivery_timestamp, order_amount, status
+            order_timestamp, delivery_timestamp, order_amount, status, description
         )
         VALUES (
             v_courier, v_client, v_address, v_restaurant,
-            v_timestamp, v_timestamp - interval '1 hour', 1000, 'доставлен'
+            v_timestamp, v_timestamp - interval '1 hour', 1000, 'доставлен', 'constraint test'
         );
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
@@ -189,9 +191,9 @@ BEGIN
     BEGIN
         INSERT INTO "order" (
             courier_id, client_id, address_id, restaurant_id,
-            order_timestamp, delivery_timestamp, order_amount, status
+            order_timestamp, delivery_timestamp, order_amount, status, description
         )
-        VALUES (v_courier, v_client, v_address, v_restaurant, v_timestamp, NULL, 1000, 'доставлен');
+        VALUES (v_courier, v_client, v_address, v_restaurant, v_timestamp, NULL, 1000, 'доставлен', 'constraint test');
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'CHECK order.delivered_has_time не сработал'; END IF;
@@ -201,9 +203,9 @@ BEGIN
     BEGIN
         INSERT INTO "order" (
             courier_id, client_id, address_id, restaurant_id,
-            order_timestamp, order_amount, status
+            order_timestamp, order_amount, status, description
         )
-        VALUES (v_courier, v_client, v_foreign_address, v_restaurant, v_timestamp, 1000, 'создан');
+        VALUES (v_courier, v_client, v_foreign_address, v_restaurant, v_timestamp, 1000, 'создан', 'constraint test');
     EXCEPTION WHEN OTHERS THEN v_failed := true;
     END;
     IF NOT v_failed THEN RAISE EXCEPTION 'FK order(client_id,address_id) не сработал'; END IF;

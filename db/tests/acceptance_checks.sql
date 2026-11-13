@@ -41,9 +41,6 @@ UNION ALL SELECT 'wrong_restaurant_product', count(DISTINCT os.order_id)
 UNION ALL SELECT 'payment_amount_mismatch', count(*)
   FROM payment p JOIN "order" o ON o.order_id = p.order_id
  WHERE p.amount <> o.total_amount
-UNION ALL SELECT 'orders_without_success', count(*)
-  FROM "order" o
- WHERE NOT EXISTS (SELECT 1 FROM payment p WHERE p.order_id = o.order_id AND p.status = 'успех')
 UNION ALL SELECT 'orders_multiple_success', count(*)
   FROM (SELECT order_id FROM payment WHERE status = 'успех' GROUP BY order_id HAVING count(*) > 1) x
 UNION ALL SELECT 'ca_dupes', count(*)
@@ -60,6 +57,16 @@ ORDER BY check_name;
 
 \echo '=== 2a. Положительные проверки ==='
 SELECT count(*) AS active_couriers FROM courier WHERE status <> 'уволен';
+
+-- BR-8.7 разрешает заказы без успешной попытки (ожидает/ошибка), поэтому эта
+-- величина справочная и не считается ошибкой. Ошибкой является только
+-- наличие двух успешных попыток (orders_multiple_success выше).
+SELECT count(*) AS orders_without_success_allowed
+  FROM "order" o
+ WHERE NOT EXISTS (
+       SELECT 1 FROM payment p
+        WHERE p.order_id = o.order_id AND p.status = 'успех'
+ );
 
 \echo '=== 3. Осиротевшие FK ==='
 SELECT 'order_structure -> order' AS fk, count(*) AS orphans

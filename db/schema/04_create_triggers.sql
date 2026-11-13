@@ -1,12 +1,24 @@
 -- ============================================================================
 -- FoodExpress / FOOD-101, FOOD-105
 -- Триггеры целостности и пересчёта рейтингов.
+--
+-- Каждая функция снабжена шапкой: назначение, BR, алгоритм и причина, по
+-- которой проверку нельзя выразить декларативно (CHECK/FK). Те же описания
+-- продублированы в COMMENT ON ..., чтобы их было видно в pgAdmin и \df+.
 -- ============================================================================
 
 SET search_path TO prudko_food, exts, public;
 
 -- ---------------------------------------------------------------------------
 -- BR-7.3: все блюда заказа — из ресторана заказа.
+--
+-- Алгоритм:
+--   1. По NEW.order_id читаем restaurant_id заказа.
+--   2. По NEW.product_id читаем restaurant_id блюда.
+--   3. Если они различаются — исключение, строка не вставляется/не меняется.
+--
+-- Декларативно нельзя: сравнение идёт через две таблицы (order и product),
+-- а CHECK в PostgreSQL не может обращаться к другим таблицам.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION check_order_structure_restaurant()
 RETURNS trigger
@@ -14,7 +26,7 @@ LANGUAGE plpgsql
 SET search_path TO prudko_food, exts, public
 AS $$
 DECLARE
-    v_order_restaurant uuid;
+    v_order_restaurant   uuid;
     v_product_restaurant uuid;
 BEGIN
     SELECT o.restaurant_id
@@ -45,13 +57,27 @@ BEGIN
 END;
 $$;
 
+COMMENT ON FUNCTION check_order_structure_restaurant() IS
+    'BR-7.3: не даёт добавить в заказ блюдо из другого ресторана. BEFORE INSERT/UPDATE ON order_structure.';
+
 CREATE TRIGGER trg_order_structure_restaurant
     BEFORE INSERT OR UPDATE ON order_structure
     FOR EACH ROW
     EXECUTE FUNCTION check_order_structure_restaurant();
 
+COMMENT ON TRIGGER trg_order_structure_restaurant ON order_structure IS
+    'BR-7.3: все позиции заказа принадлежат ресторану заказа.';
+
 -- ---------------------------------------------------------------------------
 -- BR-7.3 при смене ресторана у заказа, в котором уже есть позиции.
+--
+-- Алгоритм:
+--   1. Если restaurant_id не изменился — выходим.
+--   2. Иначе ищем хотя бы одну позицию заказа, чьё блюдо принадлежит другому
+--      ресторану.
+--   3. Если такая есть — исключение.
+--
+-- Без этого триггера BR-7.3 обходился бы сменой restaurant_id у заказа.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION check_order_restaurant_update()
 RETURNS trigger
@@ -76,14 +102,28 @@ BEGIN
 END;
 $$;
 
+COMMENT ON FUNCTION check_order_restaurant_update() IS
+    'BR-7.3: запрещает менять ресторан заказа, если в нём уже есть блюда другого ресторана. BEFORE UPDATE OF restaurant_id ON "order".';
+
 CREATE TRIGGER trg_order_restaurant_update
     BEFORE UPDATE OF restaurant_id ON "order"
     FOR EACH ROW
     EXECUTE FUNCTION check_order_restaurant_update();
 
+COMMENT ON TRIGGER trg_order_restaurant_update ON "order" IS
+    'BR-7.3: смена ресторана не должна нарушать состав уже добавленных позиций.';
+
 -- ---------------------------------------------------------------------------
 -- BR-9.1 / BR-9.2: полиморфная ссылка отзыва должна указывать на
 -- существующую сущность. Для отзыва на заказ entity_id = order_id.
+--
+-- Алгоритм:
+--   'блюдо'    -> entity_id существует в product;
+--   'ресторан' -> entity_id существует в restaurant;
+--   'заказ'    -> entity_id совпадает с order_id (сам заказ уже гарантирован FK).
+--
+-- Декларативно нельзя: целевая таблица зависит от значения entity_type,
+-- а полиморфных FK PostgreSQL не поддерживает.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION validate_review_entity()
 RETURNS trigger
@@ -110,43 +150,31 @@ BEGIN
 END;
 $$;
 
+COMMENT ON FUNCTION validate_review_entity() IS
+    'BR-9.1: проверяет, что полиморфная ссылка review.entity_id указывает на существующую сущность нужного типа. BEFORE INSERT/UPDATE ON review.';
+
 CREATE TRIGGER trg_review_entity_validate
     BEFORE INSERT OR UPDATE ON review
     FOR EACH ROW
     EXECUTE FUNCTION validate_review_entity();
 
+COMMENT ON TRIGGER trg_review_entity_validate ON review IS
+    'BR-9.1: валидация полиморфной ссылки отзыва.';
+
 -- ---------------------------------------------------------------------------
 -- BR-9.6 / BR-9.7: пересчёт агрегированного рейтинга блюда или ресторана.
+--
+-- Алгоритм:
+--   DELETE -> пересчитываем сущность из OLD;
+--   UPDATE со сменой entity_type/entity_id -> пересчитываем и OLD, и NEW;
+--   INSERT и обычный UPDATE -> пересчитываем NEW.
+--   Для entity_type = 'заказ' не делаем ничего: у заказа агрегата нет.
+--
+-- Пересчёт — один UPDATE с подзапросом AVG по review. Если отзывов больше
+-- нет, AVG возвращает NULL, и rating становится NULL (BR-9.7).
+--
+-- Рекурсии нет: триггер висит на review, а UPDATE идёт в product/restaurant.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION recalc_entity_rating(p_entity_type review_entity_type,
-                                                p_entity_id uuid)
-RETURNS void
-LANGUAGE plpgsql
-SET search_path TO prudko_food, exts, public
-AS $$
-BEGIN
-    IF p_entity_type = 'блюдо' THEN
-        UPDATE product p
-           SET rating = (
-               SELECT round(avg(r.rating), 2)
-                 FROM review r
-                WHERE r.entity_type = 'блюдо'
-                  AND r.entity_id = p_entity_id
-           )
-         WHERE p.product_id = p_entity_id;
-    ELSIF p_entity_type = 'ресторан' THEN
-        UPDATE restaurant r
-           SET rating = (
-               SELECT round(avg(rv.rating), 2)
-                 FROM review rv
-                WHERE rv.entity_type = 'ресторан'
-                  AND rv.entity_id = p_entity_id
-           )
-         WHERE r.restaurant_id = p_entity_id;
-    END IF;
-END;
-$$;
-
 CREATE OR REPLACE FUNCTION rating_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -154,30 +182,100 @@ SET search_path TO prudko_food, exts, public
 AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        PERFORM recalc_entity_rating(OLD.entity_type, OLD.entity_id);
-        RETURN OLD;
-    ELSIF TG_OP = 'INSERT' THEN
-        PERFORM recalc_entity_rating(NEW.entity_type, NEW.entity_id);
-        RETURN NEW;
-    ELSE
-        -- При смене сущности пересчитываем и старую, и новую.
-        IF OLD.entity_type IS DISTINCT FROM NEW.entity_type
-           OR OLD.entity_id IS DISTINCT FROM NEW.entity_id THEN
-            PERFORM recalc_entity_rating(OLD.entity_type, OLD.entity_id);
+        IF OLD.entity_type = 'блюдо' THEN
+            UPDATE product p
+               SET rating = (
+                   SELECT round(avg(r.rating), 2)
+                     FROM review r
+                    WHERE r.entity_type = 'блюдо'
+                      AND r.entity_id = OLD.entity_id
+               )
+             WHERE p.product_id = OLD.entity_id;
+        ELSIF OLD.entity_type = 'ресторан' THEN
+            UPDATE restaurant rs
+               SET rating = (
+                   SELECT round(avg(r.rating), 2)
+                     FROM review r
+                    WHERE r.entity_type = 'ресторан'
+                      AND r.entity_id = OLD.entity_id
+               )
+             WHERE rs.restaurant_id = OLD.entity_id;
         END IF;
-        PERFORM recalc_entity_rating(NEW.entity_type, NEW.entity_id);
-        RETURN NEW;
+        RETURN OLD;
     END IF;
+
+    -- UPDATE, при котором отзыв переехал на другую сущность:
+    -- старую сущность тоже нужно пересчитать.
+    IF TG_OP = 'UPDATE'
+       AND (OLD.entity_type IS DISTINCT FROM NEW.entity_type
+            OR OLD.entity_id IS DISTINCT FROM NEW.entity_id)
+    THEN
+        IF OLD.entity_type = 'блюдо' THEN
+            UPDATE product p
+               SET rating = (
+                   SELECT round(avg(r.rating), 2)
+                     FROM review r
+                    WHERE r.entity_type = 'блюдо'
+                      AND r.entity_id = OLD.entity_id
+               )
+             WHERE p.product_id = OLD.entity_id;
+        ELSIF OLD.entity_type = 'ресторан' THEN
+            UPDATE restaurant rs
+               SET rating = (
+                   SELECT round(avg(r.rating), 2)
+                     FROM review r
+                    WHERE r.entity_type = 'ресторан'
+                      AND r.entity_id = OLD.entity_id
+               )
+             WHERE rs.restaurant_id = OLD.entity_id;
+        END IF;
+    END IF;
+
+    IF NEW.entity_type = 'блюдо' THEN
+        UPDATE product p
+           SET rating = (
+               SELECT round(avg(r.rating), 2)
+                 FROM review r
+                WHERE r.entity_type = 'блюдо'
+                  AND r.entity_id = NEW.entity_id
+           )
+         WHERE p.product_id = NEW.entity_id;
+    ELSIF NEW.entity_type = 'ресторан' THEN
+        UPDATE restaurant rs
+           SET rating = (
+               SELECT round(avg(r.rating), 2)
+                 FROM review r
+                WHERE r.entity_type = 'ресторан'
+                  AND r.entity_id = NEW.entity_id
+           )
+         WHERE rs.restaurant_id = NEW.entity_id;
+    END IF;
+
+    RETURN NEW;
 END;
 $$;
+
+COMMENT ON FUNCTION rating_change() IS
+    'BR-9.6, BR-9.7: после INSERT/UPDATE/DELETE отзыва пересчитывает product.rating или restaurant.rating как AVG(review.rating); для entity_type = ''заказ'' ничего не делает. AFTER INSERT/UPDATE/DELETE ON review.';
 
 CREATE TRIGGER trg_rating_change
     AFTER INSERT OR UPDATE OR DELETE ON review
     FOR EACH ROW
     EXECUTE FUNCTION rating_change();
 
+COMMENT ON TRIGGER trg_rating_change ON review IS
+    'BR-9.6, BR-9.7: поддержка агрегированных рейтингов блюда и ресторана.';
+
 -- ---------------------------------------------------------------------------
 -- BR-8.7: агрегированный статус оплаты заказа по попыткам.
+--
+-- Алгоритм (порядок важен):
+--   1. Есть успешная попытка            -> 'оплачен';
+--   2. успешных нет, есть в_обработке   -> 'ожидает';
+--   3. успешных нет, все попытки ошибки -> 'ошибка';
+--   4. попыток нет                      -> 'ожидает'.
+--
+-- Декларативно нельзя: значение зависит от агрегата по другой таблице.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION refresh_order_pay_status(p_order_id uuid)
 RETURNS void
@@ -212,6 +310,9 @@ BEGIN
 END;
 $$;
 
+COMMENT ON FUNCTION refresh_order_pay_status(uuid) IS
+    'BR-8.7: пересчитывает "order".pay_status по попыткам оплаты: успех -> оплачен, в_обработке -> ожидает, только ошибки -> ошибка, попыток нет -> ожидает.';
+
 CREATE OR REPLACE FUNCTION payment_pay_status_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -234,13 +335,26 @@ BEGIN
 END;
 $$;
 
+COMMENT ON FUNCTION payment_pay_status_change() IS
+    'BR-8.7: при любом изменении payment запускает refresh_order_pay_status для затронутого заказа. AFTER INSERT/UPDATE/DELETE ON payment.';
+
 CREATE TRIGGER trg_payment_pay_status
     AFTER INSERT OR UPDATE OR DELETE ON payment
     FOR EACH ROW
     EXECUTE FUNCTION payment_pay_status_change();
 
+COMMENT ON TRIGGER trg_payment_pay_status ON payment IS
+    'BR-8.7: поддержка агрегированного статуса оплаты заказа.';
+
 -- ---------------------------------------------------------------------------
 -- BR-8.4: сумма попытки оплаты равна общей сумме заказа.
+--
+-- Алгоритм:
+--   1. Читаем "order".total_amount по NEW.order_id.
+--   2. Если заказа нет — исключение.
+--   3. Если NEW.amount <> total_amount — исключение.
+--
+-- Декларативно нельзя: CHECK не может прочитать значение из другой таблицы.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION check_payment_amount()
 RETURNS trigger
@@ -248,7 +362,7 @@ LANGUAGE plpgsql
 SET search_path TO prudko_food, exts, public
 AS $$
 DECLARE
-    v_total numeric(12,2);
+    v_total numeric(10,2);
 BEGIN
     SELECT o.total_amount
       INTO v_total
@@ -269,7 +383,13 @@ BEGIN
 END;
 $$;
 
+COMMENT ON FUNCTION check_payment_amount() IS
+    'BR-8.4: запрещает попытку оплаты на сумму, отличную от "order".total_amount. BEFORE INSERT/UPDATE ON payment.';
+
 CREATE TRIGGER trg_payment_amount_check
     BEFORE INSERT OR UPDATE ON payment
     FOR EACH ROW
     EXECUTE FUNCTION check_payment_amount();
+
+COMMENT ON TRIGGER trg_payment_amount_check ON payment IS
+    'BR-8.4: сумма попытки оплаты равна общей сумме заказа.';

@@ -2,16 +2,32 @@
 -- FoodExpress / FOOD-102, FOOD-103
 -- Генератор и очистка тестовых данных.
 --
--- Генератор не вызывает бизнес-процедуры/функции схемы (courier_salary,
--- add_product и т.п.). Он пишет данные напрямую; триггеры целостности и
--- rating_change срабатывают штатно.
+-- Принципы генерации:
+--   * строки — по паттернам samples/all_examples.sql §2: repeat(substring(...))
+--     или md5, длина всегда от 1 до N (индекс считается как 1 + floor(...),
+--     поэтому 0 невозможен);
+--   * уникальные строки (login, phone, transaction_code) генерируются
+--     случайно и при коллизии генерируются заново — без счётчиков;
+--   * enum-значения берутся из enum_range() и распределяются так, чтобы
+--     встречались все значения типа;
+--   * ID-массивы (samples §7) используются, чтобы не делать SELECT в цикле;
+--   * генератор не вызывает бизнес-процедуры/функции схемы (samples §10):
+--     courier_pay, рейтинги и связи пишутся напрямую.
+--
+-- Распределение строк — BR-11.7:
+--   value      : client, courier, product_category, restaurant;
+--   value * 5  : address (value ресторанных + value*4 клиентских),
+--                product, order, review, payment;
+--   client_address — по 4 адреса на клиента;
+--   courier_pay   — 6 месяцев на каждого курьера.
 -- ============================================================================
 
 SET search_path TO prudko_food, exts, public;
 
 -- ---------------------------------------------------------------------------
--- FOOD-103. Полная очистка тестовых данных. Типы, функции, триггеры,
--- представления и последовательности не удаляются.
+-- FOOD-103. Полная очистка тестовых данных.
+-- TRUNCATE ... CASCADE сам разрешает порядок по FK. Типы, функции,
+-- триггеры и представления не затрагиваются; последовательностей в схеме нет.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE erase_test_data()
 LANGUAGE plpgsql
@@ -32,28 +48,14 @@ BEGIN
         client,
         address
     CASCADE;
-
-    -- setval, а не ALTER SEQUENCE: inspector не является владельцем
-    -- последовательностей, но имеет право UPDATE (FOOD-109).
-    PERFORM setval('prudko_food.seq_address_num', 1, false);
-    PERFORM setval('prudko_food.seq_client_num', 1, false);
-    PERFORM setval('prudko_food.seq_courier_num', 1, false);
-    PERFORM setval('prudko_food.seq_category_num', 1, false);
-    PERFORM setval('prudko_food.seq_restaurant_num', 1, false);
-    PERFORM setval('prudko_food.seq_product_num', 1, false);
-    PERFORM setval('prudko_food.seq_phone_num', 1, false);
-    PERFORM setval('prudko_food.seq_payment_num', 1, false);
 END;
 $$;
 
+COMMENT ON PROCEDURE erase_test_data() IS
+    'FOOD-103: очищает все 12 таблиц. TRUNCATE ... CASCADE, без сброса последовательностей (их нет).';
+
 -- ---------------------------------------------------------------------------
 -- FOOD-102. insert_test_data(value)
--- Распределение строк — BR-11.7:
---   value      : client, courier, product_category, restaurant
---   value * 5  : address, product, order, review, payment
---   value      : адреса ресторанов, value * 4 : адреса клиентов
---   связи      : client_address (по 4 адреса на клиента), order_structure
---   courier_pay: 6 месяцев на каждого курьера
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE insert_test_data(value int)
 LANGUAGE plpgsql
@@ -64,16 +66,16 @@ DECLARE
 
     i int;
     j int;
-    k int;
     m int;
+    k int;
     tmp int;
 
-    v_addr_num bigint;
     v_uuid uuid;
-    v_order_id uuid;
-    v_entity_id uuid;
-
-    v_street text;
+    v_text text;
+    v_login varchar(50);
+    v_phone varchar(20);
+    v_street varchar(100);
+    v_house varchar(20);
     v_apartment varchar(20);
     v_open time;
     v_close time;
@@ -81,10 +83,11 @@ DECLARE
     v_dismissal date;
     v_status courier_status;
 
-    v_price numeric(10,2);
-    v_order_amount numeric(12,2);
-    v_total_amount numeric(12,2);
-    v_qty numeric[];
+    v_price numeric(7,2);
+    v_qty numeric[] := ARRAY[]::numeric[];
+    v_line numeric(10,2);
+    v_order_amount numeric(10,2);
+    v_total numeric(10,2);
     v_idx int[];
     v_count int;
 
@@ -92,10 +95,11 @@ DECLARE
     v_month_start timestamp;
     v_month_end timestamp;
     v_delivery_ts timestamp;
+    v_review_ts timestamp;
     v_order_status order_status;
 
-    v_roll double precision;
     v_entity_type review_entity_type;
+    v_entity_id uuid;
     v_rating numeric(2,1);
 
     v_client_idx int;
@@ -105,7 +109,7 @@ DECLARE
 
     v_coef numeric(3,2);
     v_cnt bigint;
-    v_sum numeric(12,2);
+    v_sum numeric(10,2);
     v_year int;
     v_month int;
 
@@ -120,60 +124,75 @@ DECLARE
     v_prices numeric[] := ARRAY[]::numeric[];
 
     v_restaurant_statuses restaurant_status[] := enum_range(NULL::restaurant_status);
-    v_product_statuses product_status[] := enum_range(NULL::product_status);
-    v_courier_statuses courier_status[] := enum_range(NULL::courier_status);
-    v_order_statuses order_status[] := enum_range(NULL::order_status);
-    v_payment_types payment_type[] := enum_range(NULL::payment_type);
-
-    v_streets text[] := ARRAY[
-        'ул. Ленина', 'ул. Мира', 'ул. Гагарина', 'ул. Пушкина',
-        'ул. Садовая', 'ул. Советская', 'ул. Центральная',
-        'ул. Школьная', 'ул. Лесная', 'ул. Набережная'
-    ];
+    v_product_statuses    product_status[]    := enum_range(NULL::product_status);
+    v_courier_statuses    courier_status[]    := enum_range(NULL::courier_status);
+    v_order_statuses      order_status[]      := enum_range(NULL::order_status);
+    v_payment_types       payment_type[]      := enum_range(NULL::payment_type);
+    v_entity_types        review_entity_type[] := enum_range(NULL::review_entity_type);
 BEGIN
     IF n IS NULL OR n <= 0 THEN
         RETURN;
     END IF;
 
     -- -----------------------------------------------------------------
-    -- 1. Адреса: n ресторанных + 4n клиентских (BR-11.7)
+    -- 1. Адреса: n ресторанных + 4n клиентских (BR-11.7).
+    --    Уникальность (street, house_number, apartment_office) —
+    --    случайная генерация с повтором при коллизии, без счётчиков.
     -- -----------------------------------------------------------------
-    FOR i IN 1..n LOOP
-        v_addr_num := nextval('prudko_food.seq_address_num');
-        v_street := v_streets[1 + ((v_addr_num - 1) % array_length(v_streets, 1))::int];
+    FOR i IN 1..(n * 5) LOOP
+        LOOP
+            v_street := left(
+                repeat(
+                    substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                              1, 1 + floor(random() * 33)::int),
+                    1 + floor(random() * 3)::int
+                ), 100);
+            v_house := (1 + floor(random() * 999))::int::text;
+            v_apartment := CASE
+                WHEN i <= n THEN NULL
+                WHEN random() < 0.30 THEN NULL
+                ELSE (1 + floor(random() * 300))::int::text
+            END;
+
+            EXIT WHEN NOT EXISTS (
+                SELECT 1 FROM address a
+                 WHERE a.street = v_street
+                   AND a.house_number = v_house
+                   AND a.apartment_office IS NOT DISTINCT FROM v_apartment
+            );
+        END LOOP;
 
         INSERT INTO address (street, house_number, apartment_office)
-        VALUES (v_street, v_addr_num::text, NULL)
+        VALUES (v_street, v_house, v_apartment)
         RETURNING address_id INTO v_uuid;
 
-        v_rest_addresses := array_append(v_rest_addresses, v_uuid);
-    END LOOP;
-
-    FOR i IN 1..(n * 4) LOOP
-        v_addr_num := nextval('prudko_food.seq_address_num');
-        v_street := v_streets[1 + ((v_addr_num - 1) % array_length(v_streets, 1))::int];
-        v_apartment := CASE
-            WHEN random() < 0.25 THEN NULL
-            ELSE 'кв. ' || (1 + floor(random() * 200)::int)::text
-        END;
-
-        INSERT INTO address (street, house_number, apartment_office)
-        VALUES (v_street, v_addr_num::text, v_apartment)
-        RETURNING address_id INTO v_uuid;
-
-        v_client_addresses := array_append(v_client_addresses, v_uuid);
+        IF i <= n THEN
+            v_rest_addresses := array_append(v_rest_addresses, v_uuid);
+        ELSE
+            v_client_addresses := array_append(v_client_addresses, v_uuid);
+        END IF;
     END LOOP;
 
     -- -----------------------------------------------------------------
-    -- 2. Клиенты и client_address (по 4 адреса каждому клиенту)
+    -- 2. Клиенты и client_address (по 4 адреса каждому клиенту).
+    --    login и phone_number уникальны (BR-2.2) — повтор при коллизии.
     -- -----------------------------------------------------------------
     FOR i IN 1..n LOOP
+        LOOP
+            v_login := substring(
+                md5(random()::text || clock_timestamp()::text),
+                1, 21 + floor(random() * 12)::int);
+            EXIT WHEN NOT EXISTS (SELECT 1 FROM client c WHERE c.login = v_login);
+        END LOOP;
+
+        LOOP
+            v_phone := '+79' || lpad(
+                (floor(random() * 1000000000))::bigint::text, 9, '0');
+            EXIT WHEN NOT EXISTS (SELECT 1 FROM client c WHERE c.phone_number = v_phone);
+        END LOOP;
+
         INSERT INTO client (login, password, phone_number)
-        VALUES (
-            'client_' || nextval('prudko_food.seq_client_num')::text,
-            md5(random()::text),
-            '+7' || lpad(nextval('prudko_food.seq_phone_num')::text, 10, '0')
-        )
+        VALUES (v_login, md5(random()::text), v_phone)
         RETURNING client_id INTO v_uuid;
 
         v_clients := array_append(v_clients, v_uuid);
@@ -185,30 +204,46 @@ BEGIN
     END LOOP;
 
     -- -----------------------------------------------------------------
-    -- 3. Курьеры. i = 1 всегда активен (BR-6.6).
+    -- 3. Курьеры. Статусы берутся из enum_range(), первые четыре строки
+    --    гарантированно покрывают все значения; значит, минимум один
+    --    курьер активен (BR-6.6).
+    --    hire_date — 176..179 дней назад, поэтому все заказы (не старше
+    --    начала шестимесячного окна выплат) попадают после найма.
     -- -----------------------------------------------------------------
     FOR i IN 1..n LOOP
-        v_hire := current_date - (150 + (i % 29));
+        IF i <= 4 THEN
+            v_status := v_courier_statuses[i];
+        ELSE
+            v_status := v_courier_statuses[
+                1 + floor(random() * cardinality(v_courier_statuses))::int];
+        END IF;
 
-        IF i = 1 THEN
-            v_status := 'свободен';
-            v_dismissal := NULL;
-        ELSIF random() < 0.25 THEN
-            v_status := 'уволен';
-            v_dismissal := v_hire + (10 + floor(random() * 60)::int);
+        v_hire := current_date - (176 + floor(random() * 4)::int);
+
+        IF v_status = 'уволен' THEN
+            v_dismissal := v_hire + (30 + floor(random() * 90)::int);
             IF v_dismissal > current_date THEN
                 v_dismissal := current_date;
             END IF;
         ELSE
-            -- первые три значения enum_range: свободен, занят, на_доставке
-            v_status := v_courier_statuses[1 + floor(random() * 3)::int];
             v_dismissal := NULL;
         END IF;
 
-        INSERT INTO courier (fio, phone_number, status, hire_date, dismissal_date, coefficient)
+        INSERT INTO courier (
+            last_name, first_name, middle_name, phone_number,
+            status, hire_date, dismissal_date, coefficient
+        )
         VALUES (
-            'Курьер ' || nextval('prudko_food.seq_courier_num')::text,
-            '+7' || lpad(nextval('prudko_food.seq_phone_num')::text, 10, '0'),
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 2)::int), 50),
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 2)::int), 50),
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 2)::int), 50),
+            '+79' || lpad((floor(random() * 1000000000))::bigint::text, 9, '0'),
             v_status,
             v_hire,
             v_dismissal,
@@ -223,37 +258,50 @@ BEGIN
     END LOOP;
 
     -- -----------------------------------------------------------------
-    -- 4. Категории блюд
+    -- 4. Категории блюд.
     -- -----------------------------------------------------------------
     FOR i IN 1..n LOOP
         INSERT INTO product_category (product_category_name)
-        VALUES ('Категория ' || nextval('prudko_food.seq_category_num')::text)
+        VALUES (left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                      1, 1 + floor(random() * 33)::int),
+                           1 + floor(random() * 3)::int), 100))
         RETURNING product_category_id INTO v_uuid;
 
         v_categories := array_append(v_categories, v_uuid);
     END LOOP;
 
     -- -----------------------------------------------------------------
-    -- 5. Рестораны. Первые n адресов — ресторанные (BR-11.7).
+    -- 5. Рестораны: по одному на ресторанный адрес.
+    --    ИНН / ОГРН / расчётный счёт — случайные цифры нужной длины.
     -- -----------------------------------------------------------------
     FOR i IN 1..n LOOP
-        v_open := time '08:00' + make_interval(hours => floor(random() * 3)::int);
-        v_close := time '21:00' + make_interval(hours => floor(random() * 3)::int);
+        v_open := time '08:00' + make_interval(hours => floor(random() * 4)::int);
+        v_close := time '18:00' + make_interval(hours => floor(random() * 5)::int);
+
+        v_text := regexp_replace(
+            md5(random()::text) || md5(random()::text) || md5(random()::text),
+            '[^0-9]', '', 'g');
 
         INSERT INTO restaurant (
             restaurant_name, address_id, description,
-            work_start, work_end, company_details, rating, status
+            work_start, work_end, inn, ogrn, bank_account, rating, status
         )
         VALUES (
-            'Ресторан ' || nextval('prudko_food.seq_restaurant_num')::text,
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 3)::int), 100),
             v_rest_addresses[i],
-            'Описание ресторана ' || i::text,
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 4)::int), 200),
             v_open,
             v_close,
-            'ИНН ' || substring(md5(random()::text), 1, 10)
-                || ', ОГРН ' || substring(md5(random()::text), 1, 13),
+            lpad(left(v_text, 10), 10, '0'),
+            lpad(left(v_text, 13), 13, '0'),
+            lpad(left(v_text, 20), 20, '0'),
             NULL,
-            v_restaurant_statuses[1 + floor(random() * 2)::int]
+            v_restaurant_statuses[
+                1 + ((i - 1) % cardinality(v_restaurant_statuses))]
         )
         RETURNING restaurant_id INTO v_uuid;
 
@@ -262,29 +310,34 @@ BEGIN
 
     -- -----------------------------------------------------------------
     -- 6. Блюда: ровно по 5 на ресторан (BR-11.7).
-    --    Держим плоские массивы: позиции (r-1)*5+1 .. r*5.
+    --    Плоский массив: позиции (r-1)*5+1 .. r*5.
     -- -----------------------------------------------------------------
     FOR i IN 1..n LOOP
         FOR j IN 1..5 LOOP
-            v_price := round((150 + random() * 650)::numeric, 2);
+            v_price := round((150 + random() * 850)::numeric, 2);
 
             INSERT INTO product (
                 product_name, product_category_id, price, restaurant_id,
                 photo_url, rating, status, description
             )
             VALUES (
-                'Блюдо ' || nextval('prudko_food.seq_product_num')::text,
+                left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                      1, 1 + floor(random() * 33)::int),
+                           1 + floor(random() * 3)::int), 100),
                 v_categories[1 + floor(random() * n)::int],
                 v_price,
                 v_restaurants[i],
                 CASE
-                    WHEN random() < 0.70
-                    THEN 'https://cdn.foodexpress.ru/img/' || md5(random()::text) || '.jpg'
-                    ELSE NULL
+                    WHEN random() < 0.30 THEN NULL
+                    ELSE 'https://cdn.foodexpress.ru/img/'
+                         || md5(random()::text) || '.jpg'
                 END,
                 NULL,
-                v_product_statuses[1 + floor(random() * 3)::int],
-                'Описание блюда ' || i::text || '-' || j::text
+                v_product_statuses[
+                    1 + ((i - 1) * 5 + (j - 1)) % cardinality(v_product_statuses)],
+                left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                      1, 1 + floor(random() * 33)::int),
+                           1 + floor(random() * 4)::int), 200)
             )
             RETURNING product_id INTO v_uuid;
 
@@ -294,36 +347,50 @@ BEGIN
     END LOOP;
 
     -- -----------------------------------------------------------------
-    -- 7. Заказы, состав, оплаты и отзывы (по value * 5)
+    -- 7. Заказы, состав, оплаты и отзывы (по value * 5).
     -- -----------------------------------------------------------------
     FOR i IN 1..(n * 5) LOOP
         v_rest_idx := 1 + ((i - 1) % n);
         v_client_idx := 1 + floor(random() * n)::int;
         v_courier_idx := 1 + floor(random() * array_length(v_active_couriers, 1))::int;
 
-        -- равномерно по последним 6 месяцам; текущий месяц ограничен "сейчас"
-        v_month_start := date_trunc('month', localtimestamp)
-                         - make_interval(months => (i - 1) % 6);
-        v_month_end := LEAST(v_month_start + interval '1 month', localtimestamp);
-        v_order_ts := v_month_start + (v_month_end - v_month_start) * random();
+        -- Даты: первые 6 заказов равномерно покрывают 6 календарных месяцев
+        -- (текущий и пять предыдущих), остальные — случайно в этом же окне.
+        -- Так все доставленные заказы попадают в периоды, за которые
+        -- генератор создаёт выплаты courier_pay. Всё не позже "сейчас".
+        IF i <= 6 THEN
+            v_month_start := date_trunc('month', localtimestamp)
+                             - make_interval(months => i - 1);
+            v_month_end := least(v_month_start + interval '1 month', localtimestamp);
+            v_order_ts := v_month_start + (v_month_end - v_month_start) * random();
+        ELSE
+            v_month_start := date_trunc('month', localtimestamp)
+                             - interval '5 months';
+            v_order_ts := v_month_start
+                          + (localtimestamp - v_month_start) * random();
+        END IF;
 
-        -- первые 6 заказов гарантируют доставку в каждом из 6 месяцев
+        -- Статусы: первые 6 заказов доставлены (чтобы отчёт покрывал
+        -- 6 месяцев), следующие 5 покрывают все значения enum, остальные
+        -- распределены с преобладанием 'доставлен'.
         IF i <= 6 THEN
             v_order_status := 'доставлен';
-        ELSIF random() < 0.80 THEN
-            v_order_status := 'доставлен';
+        ELSIF i <= 11 THEN
+            v_order_status := v_order_statuses[i - 6];
         ELSE
             v_order_status := CASE
-                WHEN random() < 0.75 THEN v_order_statuses[1 + floor(random() * 3)::int]
-                ELSE 'отменён'::order_status
+                WHEN random() < 0.70 THEN 'доставлен'
+                WHEN random() < 0.40 THEN 'отменён'
+                WHEN random() < 0.50 THEN 'создан'
+                WHEN random() < 0.55 THEN 'готовится'
+                ELSE 'в_доставке'
             END;
         END IF;
 
         IF v_order_status = 'доставлен' THEN
-            v_delivery_ts := LEAST(
-                v_order_ts + make_interval(mins => 20 + floor(random() * 40)::int),
-                localtimestamp
-            );
+            v_delivery_ts := least(
+                v_order_ts + make_interval(mins => 20 + floor(random() * 60)::int),
+                localtimestamp);
             IF v_delivery_ts < v_order_ts THEN
                 v_delivery_ts := v_order_ts;
             END IF;
@@ -331,7 +398,7 @@ BEGIN
             v_delivery_ts := NULL;
         END IF;
 
-        -- 1..5 уникальных блюд только из ресторана заказа (BR-7.3, BR-7.16)
+        -- 1..5 уникальных блюд только из ресторана заказа (BR-7.3, BR-7.16).
         v_product_position := (v_rest_idx - 1) * 5;
         v_idx := ARRAY[
             v_product_position + 1,
@@ -350,23 +417,33 @@ BEGIN
 
         v_count := 1 + floor(random() * 5)::int;
         v_qty := ARRAY[]::numeric[];
-        v_order_amount := 0;
 
         FOR j IN 1..v_count LOOP
             v_qty[j] := CASE
                 WHEN random() < 0.15 THEN 0.5
                 ELSE (1 + floor(random() * 3))::numeric
             END;
-            v_order_amount := v_order_amount + v_qty[j] * v_prices[v_idx[j]];
         END LOOP;
 
-        -- BR-7.11: total_amount >= 1000, т.е. order_amount >= 909.09
-        WHILE v_order_amount < 909.09 LOOP
-            v_qty[1] := v_qty[1] + 1;
-            v_order_amount := v_order_amount + v_prices[v_idx[1]];
+        -- Сумма — точная сумма округлённых стоимостей позиций.
+        v_order_amount := 0;
+        FOR j IN 1..v_count LOOP
+            v_order_amount := v_order_amount
+                + round(v_qty[j] * v_prices[v_idx[j]], 2);
         END LOOP;
 
-        v_order_amount := round(v_order_amount, 2);
+        -- Держим order_amount >= 1000, чтобы вопрос о минимальной сумме
+        -- не возникал даже при чтении order_amount (BR-7.11, BR-1.8).
+        IF v_order_amount < 1000 THEN
+            v_qty[1] := v_qty[1]
+                + ceil((1000 - v_order_amount) / v_prices[v_idx[1]]);
+
+            v_order_amount := 0;
+            FOR j IN 1..v_count LOOP
+                v_order_amount := v_order_amount
+                    + round(v_qty[j] * v_prices[v_idx[j]], 2);
+            END LOOP;
+        END IF;
 
         INSERT INTO "order" (
             courier_id, client_id, address_id, restaurant_id,
@@ -381,44 +458,92 @@ BEGIN
             v_delivery_ts,
             v_order_amount,
             v_order_status,
-            'Тестовый заказ ' || i::text
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 4)::int), 200)
         )
-        RETURNING order_id, total_amount INTO v_order_id, v_total_amount;
+        RETURNING order_id, total_amount INTO v_uuid, v_total;
 
         FOR j IN 1..v_count LOOP
             INSERT INTO order_structure (order_id, product_id, quantity)
-            VALUES (v_order_id, v_products[v_idx[j]], v_qty[j]);
+            VALUES (v_uuid, v_products[v_idx[j]], v_qty[j]);
         END LOOP;
 
-        -- BR-8.1 и BR-8.4: ровно одна успешная попытка на заказ.
-        INSERT INTO payment (
-            order_id, payment_type, amount, transaction_code,
-            payment_timestamp, status
-        )
-        VALUES (
-            v_order_id,
-            v_payment_types[1 + floor(random() * 3)::int],
-            v_total_amount,
-            'tx_' || nextval('prudko_food.seq_payment_num')::text
-                || '_' || substring(md5(random()::text || v_order_id::text), 1, 16),
-            LEAST(v_order_ts + make_interval(mins => floor(random() * 10)::int), localtimestamp),
-            'успех'
-        );
+        -- -----------------------------------------------------------------
+        -- Оплаты: ровно 5n строк на 5n заказов.
+        -- Сценарий зависит от i mod 5 (в каждом блоке из 5 заказов —
+        -- 2 + 1 + 1 + 1 + 0 = 5 попыток):
+        --   1: ошибка, затем успех -> pay_status = 'оплачен';
+        --   2: успех               -> 'оплачен';
+        --   3: ошибка              -> 'ошибка';
+        --   4: в_обработке         -> 'ожидает';
+        --   0: попыток нет         -> 'ожидает'.
+        -- У каждого заказа не больше одной успешной попытки (BR-8.1),
+        -- сумма каждой попытки равна total_amount (BR-8.4).
+        -- -----------------------------------------------------------------
+        FOR j IN 1..CASE ((i - 1) % 5)
+                            WHEN 1 THEN 2
+                            WHEN 2 THEN 1
+                            WHEN 3 THEN 1
+                            WHEN 4 THEN 1
+                            ELSE 0
+                        END
+        LOOP
+            LOOP
+                v_text := md5(random()::text || clock_timestamp()::text)
+                          || substring(md5(random()::text), 1, 16);
+                EXIT WHEN NOT EXISTS (
+                    SELECT 1 FROM payment p WHERE p.transaction_code = v_text
+                );
+            END LOOP;
 
-        -- Ровно один отзыв на заказ: до N+2 отзывов (BR-9.5), здесь 1.
-        v_roll := random();
-        IF v_roll < 0.45 THEN
-            v_entity_type := 'блюдо';
+            INSERT INTO payment (
+                order_id, payment_type, amount, transaction_code,
+                payment_timestamp, status
+            )
+            VALUES (
+                v_uuid,
+                v_payment_types[1 + ((i + j - 2) % cardinality(v_payment_types))],
+                v_total,
+                v_text,
+                least(v_order_ts
+                      + make_interval(mins => 5 + j * 5 + floor(random() * 5)::int),
+                      localtimestamp),
+                CASE
+                    WHEN (i - 1) % 5 = 1 AND j = 1 THEN 'ошибка'::payment_status
+                    WHEN (i - 1) % 5 = 1 AND j = 2 THEN 'успех'::payment_status
+                    WHEN (i - 1) % 5 = 2 THEN 'успех'::payment_status
+                    WHEN (i - 1) % 5 = 3 THEN 'ошибка'::payment_status
+                    ELSE 'в_обработке'::payment_status
+                END
+            );
+        END LOOP;
+
+        -- -----------------------------------------------------------------
+        -- Ровно один отзыв на заказ (5n отзывов). Тип сущности циклически
+        -- покрывает все три значения; блюдо выбирается из состава заказа,
+        -- поэтому BR-9.2 «отзыв на то, что заказал» соблюдается, а
+        -- UNIQUE (order_id, entity_type, entity_id) не нарушается.
+        -- -----------------------------------------------------------------
+        v_entity_type := v_entity_types[
+            1 + ((i - 1) % cardinality(v_entity_types))];
+
+        IF v_entity_type = 'блюдо' THEN
             v_entity_id := v_products[v_idx[1 + floor(random() * v_count)::int]];
-        ELSIF v_roll < 0.75 THEN
-            v_entity_type := 'ресторан';
+        ELSIF v_entity_type = 'ресторан' THEN
             v_entity_id := v_restaurants[v_rest_idx];
         ELSE
-            v_entity_type := 'заказ';
-            v_entity_id := v_order_id;
+            v_entity_id := v_uuid;  -- отзыв на заказ: entity_id = order_id
         END IF;
 
-        v_rating := (1 + floor(random() * 5)::int)::numeric(2,1);
+        v_rating := round((1 + random() * 4)::numeric, 1);
+
+        v_review_ts := least(
+            v_order_ts + make_interval(hours => 1 + floor(random() * 48)::int),
+            localtimestamp);
+        IF v_review_ts < v_order_ts THEN
+            v_review_ts := v_order_ts;
+        END IF;
 
         INSERT INTO review (
             client_id, review_timestamp, entity_id, entity_type,
@@ -426,34 +551,34 @@ BEGIN
         )
         VALUES (
             v_clients[v_client_idx],
-            LEAST(
-                v_order_ts + make_interval(hours => 1 + floor(random() * 48)::int),
-                localtimestamp
-            ),
+            v_review_ts,
             v_entity_id,
             v_entity_type,
-            v_order_id,
-            'Отзыв на заказ ' || i::text,
+            v_uuid,
+            left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                                  1, 1 + floor(random() * 33)::int),
+                       1 + floor(random() * 4)::int), 200),
             CASE
-                WHEN random() < 0.30
-                THEN 'https://cdn.foodexpress.ru/reviews/' || md5(random()::text) || '.jpg'
-                ELSE NULL
+                WHEN random() < 0.30 THEN NULL
+                ELSE 'https://cdn.foodexpress.ru/reviews/'
+                     || md5(random()::text) || '.jpg'
             END,
             v_rating
         );
     END LOOP;
 
     -- -----------------------------------------------------------------
-    -- 8. courier_pay за 6 месяцев (BR-10.2, BR-10.7).
-    --    coefficient_used каждого месяца — коэффициент, действовавший
-    --    в этом месяце; после месяца считается коэффициент на следующий.
+    -- 8. courier_pay за последние 6 месяцев (BR-10.2, BR-10.7).
+    --    coefficient_used — коэффициент, действовавший в этом месяце;
+    --    новый коэффициент начинает действовать со следующего месяца.
     -- -----------------------------------------------------------------
     FOR i IN 1..array_length(v_couriers, 1) LOOP
         v_uuid := v_couriers[i];
         v_coef := 0.10;
 
         FOR m IN REVERSE 5..0 LOOP
-            v_month_start := date_trunc('month', localtimestamp) - make_interval(months => m);
+            v_month_start := date_trunc('month', localtimestamp)
+                             - make_interval(months => m);
             v_year := extract(year FROM v_month_start)::int;
             v_month := extract(month FROM v_month_start)::int;
 
@@ -483,3 +608,6 @@ BEGIN
     END LOOP;
 END;
 $$;
+
+COMMENT ON PROCEDURE insert_test_data(int) IS
+    'FOOD-102: генерирует тестовые данные по BR-11.7. Строки — случайные по samples §2, все enum-значения присутствуют, оплаты разнообразны, суммы и даты согласованы, генератор не вызывает бизнес-процедуры.';
