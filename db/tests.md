@@ -9,7 +9,7 @@
 | Параметр | Значение |
 |---|---|
 | PostgreSQL version | `PostgreSQL 18.4 (Debian 18.4-1.pgdg12+1) on x86_64-pc-linux-gnu` |
-| Дата проверки | 2026-11-13 |
+| Дата проверки | 2026-11-14 |
 | Схема | `prudko_food` |
 | Роль-аудитор | `inspector` |
 
@@ -37,7 +37,7 @@ psql -d foodexpress_restore2 -f grants.sql
 `pg_database_owner` (существует в PostgreSQL 14+ и не требует создания в
 целевой БД), поэтому команды `ALTER ... OWNER TO` из архива выполняются на
 любом кластере. Роли `admin` в бэкапе нет: `grep -c 'OWNER TO admin'` по
-`pg_restore -f -` даёт 0, `OWNER TO pg_database_owner` — 34.
+`pg_restore -f -` даёт 0, `OWNER TO pg_database_owner` — 33.
 
 Почему именно так: custom-формат (`-Fc`) хранит владельца в TOC архива, а
 `pg_dump -O` отключает владельца только для plain-text (это написано в
@@ -250,7 +250,7 @@ ORDER BY tbl;
 | `review` | 50 |
 | `payment` | 50 |
 | `client_address` | 40 |
-| `order_structure` | 143 |
+| `order_structure` | 160 |
 | `courier_pay` | 60 |
 
 `client_address` и `courier_pay` — необходимое количество для связности:
@@ -310,7 +310,7 @@ SELECT count(*) FROM courier WHERE status != 'уволен';
 
 Ожидается: `>= 1`.
 
-Факт: `active_couriers = 7` в каноническом прогоне (в других прогонах — 6–8;
+Факт: `active_couriers = 8` в каноническом прогоне (в других прогонах — 6–8;
 правило выполняется всегда, потому что первые четыре курьера получают все
 четыре статуса, включая `'уволен'`).
 
@@ -331,8 +331,8 @@ SELECT pay_status, count(*) FROM "order" GROUP BY 1;
 
 | Тип | Распределение |
 |---|---|
-| `courier.status` | `свободен 3`, `занят 3`, `на_доставке 1`, `уволен 3` |
-| `order.status` | все 5 значений (около 70 % — `доставлен`) |
+| `courier.status` | `свободен 2`, `занят 2`, `на_доставке 4`, `уволен 2` |
+| `order.status` | все 5 значений (36 из 50 — `доставлен`) |
 | `payment.status` | `успех 20`, `ошибка 20`, `в_обработке 10` |
 | `order.pay_status` | `оплачен 20`, `ошибка 10`, `ожидает 20` |
 
@@ -410,7 +410,7 @@ SELECT count(*) FROM "order" WHERE total_amount < 1000;
 
 Ожидается: 0.
 
-Факт: 0 (`total_lt_1000`). Дополнительно `min(order_amount) = 1002.84`, то есть
+Факт: 0 (`total_lt_1000`). Дополнительно `min(order_amount) = 1021.77`, то есть
 порог 1000 соблюдён и по сумме без комиссии.
 
 Вердикт: OK.
@@ -686,7 +686,7 @@ samples §2), поэтому конкретные значения не прив
 Факт: после двух вызовов подряд `changed_after_salary = 0`, число строк за
 текущий месяц — 10. Реализовано через `INSERT ... ON CONFLICT (year, month,
 courier_id) DO UPDATE`; `coalesce(cp.coefficient_used, c.coefficient)`
-обеспечивает идемпотентность (см. `constraints.md`, п. 10.9).
+обеспечивает идемпотентность (см. `constraints.md`, п. 10.8).
 
 Вердикт: OK.
 
@@ -724,7 +724,7 @@ courier_id) DO UPDATE`; `coalesce(cp.coefficient_used, c.coefficient)`
 
 | year_month | sum_no_commission | sum_with_commission | commission | courier_pay | net_profit |
 |---|---:|---:|---:|---:|---:|
-| 2026-09 | 0 | 0 | 0 | 167.86 | -167.86 |
+| 2026-09 | 0 | 0 | 0 | 168.30 | -168.30 |
 
 Непрерывная серия строится рекурсивным CTE `bounds`/`months`, а `base`
 использует `LEFT JOIN`, поэтому месяц не выпадает.
@@ -743,8 +743,8 @@ courier_id) DO UPDATE`; `coalesce(cp.coefficient_used, c.coefficient)`
 
 | year_month | sum_no_commission | sum_with_commission | commission | prev_commission | commission_diff | courier_pay | net_profit |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 2026-06 | 11680.45 | 12848.49 | 1168.04 | NULL | NULL | 116.81 | 1051.23 |
-| 2026-07 | 21911.22 | 24102.34 | 2191.12 | 1168.04 | 1023.08 | 219.12 | 1972.00 |
+| 2026-06 | 21032.71 | 23135.98 | 2103.27 | NULL | NULL | 210.33 | 1892.94 |
+| 2026-07 | 14689.95 | 16158.96 | 1469.01 | 2103.27 | -634.26 | 146.91 | 1322.10 |
 
 Суммы зависят от случайных тестовых данных; формулы проверяются на каждом
 прогоне через `acceptance_checks.sql`.
@@ -812,7 +812,8 @@ courier_id) DO UPDATE`; `coalesce(cp.coefficient_used, c.coefficient)`
 Ожидается: два SubPlan, каждый — скан `"order"`.
 
 Факт: два `SubPlan`, в каждом `Seq Scan on "order"` с фильтром по курьеру и
-статусу; `loops = 10` (по числу курьеров), `Execution Time: 0.216 ms`.
+статусу; `loops = 10` (по числу курьеров), `Execution Time: 0.344 ms`
+(медиана 5 прогонов).
 
 Вердикт: OK (паттерн воспроизведён).
 
@@ -820,8 +821,9 @@ courier_id) DO UPDATE`; `coalesce(cp.coefficient_used, c.coefficient)`
 
 Ожидается: один `Hash Right Join` / `Hash Left Join`, один скан `"order"`.
 
-Факт: `HashAggregate` → `Hash Right Join` → один `Seq Scan on "order"` +
-`Seq Scan on courier`; `Execution Time: 0.084 ms` (меньше, чем 0.216 ms в H.1).
+Факт: `HashAggregate` → `Hash Left Join` → один `Seq Scan on "order"` +
+`Seq Scan on courier`; `Execution Time: 0.231 ms` (медиана 5 прогонов; меньше,
+чем 0.344 ms в H.1).
 
 Вердикт: OK.
 
@@ -831,8 +833,9 @@ courier_id) DO UPDATE`; `coalesce(cp.coefficient_used, c.coefficient)`
 оконных функций там, где хватает агрегата.
 
 Факт: `EXPLAIN ANALYZE SELECT * FROM get_statistic();` даёт
-`Function Scan on get_statistic`, `Execution Time: 2.588 ms` — внутренний план
-SQL-функции снаружи не раскрывается. В теле функции (`07_get_statistic.sql`):
+`Function Scan on get_statistic`, `Execution Time: 3.301 ms` (медиана
+5 прогонов) — внутренний план SQL-функции снаружи не раскрывается. В теле
+функции (`07_get_statistic.sql`):
 
 - `"order"` сканируется один раз в материализованном CTE `delivered`;
 - лучшие блюдо и клиент выбираются через `DISTINCT ON (restaurant_id)`, а не
@@ -847,16 +850,18 @@ SQL-функции снаружи не раскрывается. В теле ф�
 у `row_number` это все группы «ресторан × блюдо» и «ресторан × клиент», у
 `DISTINCT ON` — уже по одной на ресторан. Отсортировано в обоих вариантах
 одинаковое число групп, поэтому время определяется сортировкой и на этих
-объёмах различается в пределах шума (разброс единичных прогонов — от 7 до
-22 мс на 300 ресторанах).
+объёмах различается в пределах шума (разброс единичных прогонов — от 10 до
+23 мс на 300 ресторанах).
 
 | Набор | `row_number`: строк в CTE | `DISTINCT ON`: строк в CTE | `row_number`, время | `DISTINCT ON`, время |
 |---|---|---:|---:|---:|
-| `insert_test_data(10)`, 50 заказов | 46 / 33 | 10 / 10 | 0.62 ms | 0.72 ms |
-| `insert_test_data(300)`, 1500 заказов | 1407 / 1055 | 298 / 298 | 9.1 ms | 10.3 ms |
+| `insert_test_data(10)`, 50 заказов | 50 / 28 | 10 / 10 | 0.981 ms | 1.059 ms |
+| `insert_test_data(300)`, 1500 заказов | 1431 / 1095 | 300 / 300 | 19.911 ms | 13.997 ms |
 
-Выигрыш здесь не столько во времени, сколько в структуре плана: в соединение
-приходит по одной строке на ресторан (46 → 10 и 1407 → 298) вместо всех строк
+На 300 ресторанах `DISTINCT ON` оказался ещё и быстрее (14.0 против 19.9 мс),
+на 50 заказах разница в пределах шума (1.06 против 0.98 мс). Выигрыш здесь не
+столько во времени, сколько в структуре плана: в соединение
+приходит по одной строке на ресторан (50 → 10 и 1431 → 300) вместо всех строк
 группы с последующей фильтрацией `rn = 1`, а узла `WindowAgg` в плане нет.
 Именно этого требует BR-11.8: убрать лишние строки и повторную обработку, а не
 выжать миллисекунды на учебном объёме.

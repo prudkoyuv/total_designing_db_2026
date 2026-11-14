@@ -99,9 +99,6 @@ CREATE TABLE restaurant (
         REFERENCES address (address_id) ON DELETE RESTRICT,
     CONSTRAINT chk_restaurant_name_not_empty CHECK (length(trim(restaurant_name)) > 0),
     CONSTRAINT chk_restaurant_description_not_empty CHECK (length(trim(description)) > 0),
-    CONSTRAINT chk_restaurant_inn CHECK (inn ~ '^[0-9]{10}([0-9]{2})?$'),
-    CONSTRAINT chk_restaurant_ogrn CHECK (ogrn ~ '^[0-9]{13}([0-9]{2})?$'),
-    CONSTRAINT chk_restaurant_bank_account CHECK (bank_account ~ '^[0-9]{20}$'),
     CONSTRAINT chk_restaurant_work_hours CHECK (work_end > work_start),
     CONSTRAINT chk_restaurant_rating CHECK (rating IS NULL OR (rating >= 0 AND rating <= 5))
 );
@@ -109,11 +106,11 @@ CREATE TABLE restaurant (
 COMMENT ON TABLE restaurant IS
     'Ресторан-партнёр. Один адрес у ресторана, адрес не делится с другим рестораном (BR-3.3).';
 COMMENT ON COLUMN restaurant.inn IS
-    'ИНН: 10 цифр у юрлица, 12 у ИП (BR-4.5). Отдельный атомарный атрибут вместо текста реквизитов.';
+    'ИНН из реквизитов ресторана (BR-4.5). Отдельный атомарный атрибут вместо текста реквизитов.';
 COMMENT ON COLUMN restaurant.ogrn IS
-    'ОГРН: 13 цифр у юрлица, 15 у ИП (BR-4.5).';
+    'ОГРН из реквизитов ресторана (BR-4.5).';
 COMMENT ON COLUMN restaurant.bank_account IS
-    'Расчётный счёт: ровно 20 цифр (BR-4.5).';
+    'Расчётный счёт из реквизитов ресторана (BR-4.5).';
 COMMENT ON COLUMN restaurant.rating IS
     'Среднее по отзывам на ресторан; NULL, пока отзывов нет (BR-9.6, BR-9.7).';
 
@@ -358,17 +355,7 @@ COMMENT ON COLUMN review.photo_url IS
 COMMENT ON COLUMN review.rating IS
     'Оценка от 1 до 5 с шагом 0.1 (BR-9.4).';
 
--- ---------------------------------------------------------------------------
--- Индексы под JOIN/агрегаты отчётов и триггеров.
--- ---------------------------------------------------------------------------
-CREATE INDEX idx_client_address_address ON client_address (address_id);
-CREATE INDEX idx_product_restaurant ON product (restaurant_id);
-CREATE INDEX idx_product_category ON product (product_category_id);
-CREATE INDEX idx_order_courier_status ON "order" (courier_id, status, order_timestamp);
-CREATE INDEX idx_order_restaurant_status ON "order" (restaurant_id, status);
-CREATE INDEX idx_order_client ON "order" (client_id);
-CREATE INDEX idx_order_timestamp ON "order" (order_timestamp);
-CREATE INDEX idx_order_structure_product ON order_structure (product_id);
-CREATE INDEX idx_payment_order ON payment (order_id);
-CREATE INDEX idx_review_entity ON review (entity_type, entity_id);
-CREATE INDEX idx_review_order ON review (order_id);
+-- Дополнительных индексов производительности нет: BR-11.8 прямо говорит,
+-- что оценка оптимизации индексами не определяется. Остаются только индексы,
+-- которые создаёт PostgreSQL под PK и UNIQUE-ограничения, и частичный
+-- uq_payment_success_per_order (BR-8.1).

@@ -43,11 +43,3 @@ GRANT EXECUTE ON ALL ROUTINES IN SCHEMA prudko_food TO inspector;
 -- FOOD-109: exts нужен для exts.uuid_generate_v4() (BR-11.1, BR-13.3).
 GRANT USAGE ON SCHEMA exts TO inspector;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA exts TO inspector;
-
--- FOOD-109: подключение к текущей базе (по умолчанию есть у PUBLIC,
--- фиксируем явно, чтобы доступ не зависел от будущих изменений прав PUBLIC).
-DO $$
-BEGIN
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO inspector', current_database());
-END;
-$$;

@@ -276,67 +276,53 @@ COMMENT ON TRIGGER trg_rating_change ON review IS
 --   4. попыток нет                      -> 'ожидает'.
 --
 -- Декларативно нельзя: значение зависит от агрегата по другой таблице.
+-- Пересчёт встроен в триггерную функцию: отдельного хелпера нет.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION refresh_order_pay_status(p_order_id uuid)
-RETURNS void
-LANGUAGE plpgsql
-SET search_path TO prudko_food, exts, public
-AS $$
-DECLARE
-    v_status order_pay_status;
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM payment
-         WHERE order_id = p_order_id AND status = 'успех'
-    ) THEN
-        v_status := 'оплачен';
-    ELSIF EXISTS (
-        SELECT 1 FROM payment
-         WHERE order_id = p_order_id AND status = 'в_обработке'
-    ) THEN
-        v_status := 'ожидает';
-    ELSIF EXISTS (
-        SELECT 1 FROM payment
-         WHERE order_id = p_order_id AND status = 'ошибка'
-    ) THEN
-        v_status := 'ошибка';
-    ELSE
-        v_status := 'ожидает';
-    END IF;
-
-    UPDATE "order"
-       SET pay_status = v_status
-     WHERE order_id = p_order_id;
-END;
-$$;
-
-COMMENT ON FUNCTION refresh_order_pay_status(uuid) IS
-    'BR-8.7: пересчитывает "order".pay_status по попыткам оплаты: успех -> оплачен, в_обработке -> ожидает, только ошибки -> ошибка, попыток нет -> ожидает.';
-
 CREATE OR REPLACE FUNCTION payment_pay_status_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path TO prudko_food, exts, public
 AS $$
+DECLARE
+    v_order_ids uuid[];
+    v_order_id  uuid;
+    v_status    order_pay_status;
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        PERFORM refresh_order_pay_status(OLD.order_id);
-        RETURN OLD;
+        v_order_ids := ARRAY[OLD.order_id];
     ELSIF TG_OP = 'INSERT' THEN
-        PERFORM refresh_order_pay_status(NEW.order_id);
-        RETURN NEW;
+        v_order_ids := ARRAY[NEW.order_id];
+    ELSIF OLD.order_id IS DISTINCT FROM NEW.order_id THEN
+        v_order_ids := ARRAY[OLD.order_id, NEW.order_id];
     ELSE
-        IF OLD.order_id IS DISTINCT FROM NEW.order_id THEN
-            PERFORM refresh_order_pay_status(OLD.order_id);
-        END IF;
-        PERFORM refresh_order_pay_status(NEW.order_id);
-        RETURN NEW;
+        v_order_ids := ARRAY[NEW.order_id];
     END IF;
+
+    FOREACH v_order_id IN ARRAY v_order_ids LOOP
+        SELECT CASE
+                   WHEN bool_or(status = 'успех') THEN 'оплачен'::order_pay_status
+                   WHEN bool_or(status = 'в_обработке') THEN 'ожидает'::order_pay_status
+                   WHEN bool_or(status = 'ошибка') THEN 'ошибка'::order_pay_status
+                   ELSE 'ожидает'::order_pay_status
+               END
+          INTO v_status
+          FROM payment
+         WHERE order_id = v_order_id;
+
+        UPDATE "order"
+           SET pay_status = v_status
+         WHERE order_id = v_order_id;
+    END LOOP;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
 COMMENT ON FUNCTION payment_pay_status_change() IS
-    'BR-8.7: при любом изменении payment запускает refresh_order_pay_status для затронутого заказа. AFTER INSERT/UPDATE/DELETE ON payment.';
+    'BR-8.7: после любого изменения payment пересчитывает "order".pay_status по попыткам: успех -> оплачен, в_обработке -> ожидает, только ошибки -> ошибка, попыток нет -> ожидает. AFTER INSERT/UPDATE/DELETE ON payment.';
 
 CREATE TRIGGER trg_payment_pay_status
     AFTER INSERT OR UPDATE OR DELETE ON payment
