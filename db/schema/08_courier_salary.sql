@@ -1,19 +1,8 @@
 -- ============================================================================
 -- FoodExpress / FOOD-107
 -- courier_salary() — зарплата курьеров за текущий месяц (BR-10.2).
---
--- Таблица "order" читается ровно один раз: агрегат agg считает для каждого
--- курьера сразу count(доставленных) и sum(commission). Этот же агрегат
--- используется и для INSERT в courier_pay, и для UPDATE коэффициента.
---
--- coalesce(sum(...), 0) нужен потому, что sum по пустому набору — NULL,
--- а зарплата курьера без доставок должна быть 0 (FOOD-107). Для count()
--- coalesce не нужен: count(*) по LEFT JOIN возвращает 0, а не NULL.
---
--- coalesce(cp.coefficient_used, c.coefficient) обеспечивает идемпотентность:
--- при повторном вызове за тот же месяц courier.coefficient уже переключён на
--- следующий месяц, поэтому применённый коэффициент берётся из существующей
--- записи courier_pay. Повторный вызов обновляет строку, а не создаёт дубль.
+-- Месяц считается по delivery_timestamp. Повторный вызов идемпотентен:
+-- применённый коэффициент берётся из уже созданной записи courier_pay.
 -- ============================================================================
 
 SET search_path TO prudko_food, exts, public;
@@ -38,11 +27,12 @@ BEGIN
           LEFT JOIN "order" o
                  ON o.courier_id = c.courier_id
                 AND o.status = 'доставлен'
-                AND o.order_timestamp >= v_start
-                AND o.order_timestamp < v_end
+                AND o.delivery_timestamp >= v_start
+                AND o.delivery_timestamp < v_end
          GROUP BY c.courier_id, c.status, c.coefficient
     ),
     ins AS (
+        -- Повторный вызов обновляет строку, сохраняя уже применённый коэффициент.
         INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)
         SELECT v_year,
                v_month,
@@ -57,7 +47,7 @@ BEGIN
         ON CONFLICT (year, month, courier_id) DO UPDATE
            SET amount = EXCLUDED.amount,
                coefficient_used = EXCLUDED.coefficient_used
-        RETURNING 1
+        RETURNING courier_id
     )
     UPDATE courier c
        SET coefficient = CASE
@@ -67,10 +57,8 @@ BEGIN
                ELSE 0.50
            END
       FROM agg a
+      JOIN ins i ON i.courier_id = a.courier_id
      WHERE c.courier_id = a.courier_id
        AND c.status <> 'уволен';  -- BR-10.6: уволенным коэффициент не назначается
 END;
 $$;
-
-COMMENT ON PROCEDURE courier_salary() IS
-    'FOOD-107, BR-10.2: считает зарплату за текущий месяц и новый коэффициент. "order" читается один раз (агрегат agg), повторный вызов идемпотентен; уволенные получают выплату, но коэффициент не обновляется.';
