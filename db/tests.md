@@ -25,8 +25,11 @@ psql -d foodexpress_restore -f grants.sql
 Ожидается: без ошибок; архив содержит только схему.
 Факт: восстановлено в пустую БД с заранее созданными `exts` и `uuid-ossp` (BR-13.3).
 В TOC только объекты схемы: 1 `SCHEMA`, 12 `TABLE`, 8 `TYPE`, 6 `FUNCTION`/`PROCEDURE`
-(2 + 4), 1 `TRIGGER`, 1 `VIEW`, 1 `INDEX`; записей `DATABASE`, `EXTENSION`, `TABLE DATA` нет.
-Владелец объектов — `pg_database_owner`, зависимость от роли разработчика отсутствует.
+(2 + 4), 1 `TRIGGER`, 1 `VIEW`, 1 пользовательский `INDEX`, 17 ограничений
+таблиц (PK/UNIQUE/CHECK) и 16 FK; записей `DATABASE`, `EXTENSION`, `TABLE DATA` нет.
+Владелец всех объектов — `pg_database_owner`, зависимость от роли разработчика
+отсутствует. Повторное применение `grants.sql` не меняет пароль существующей
+роли (`NOTICE`, затем `GRANT`).
 Вердикт: OK.
 
 ### A.2. Переключение на inspector
@@ -130,6 +133,49 @@ SELECT count(*) FROM client WHERE password !~ '^[0-9a-f]{32}$';
 
 Ожидается: 0.
 Факт: 0.
+Вердикт: OK.
+
+### B.8. Точность `numeric`
+
+```sql
+SELECT table_name, column_name, numeric_precision, numeric_scale
+FROM information_schema.columns
+WHERE table_schema = 'prudko_food' AND data_type = 'numeric'
+ORDER BY table_name, ordinal_position;
+```
+
+Ожидается: деньги — `(7,2)`/`(8,2)`, количество — `(6,3)`, рейтинги сущностей —
+`(3,2)`, оценка отзыва — `(2,1)`, коэффициенты — `(3,2)`.
+Факт: `product.price (7,2)`; `order.order_amount (7,2)`, `commission (7,2)`,
+`total_amount (8,2)`; `payment.amount (8,2)`; `courier_pay.amount (8,2)`;
+`order_structure.quantity (6,3)`; `product.rating`/`restaurant.rating (3,2)`;
+`review.rating (2,1)`; `courier.coefficient`/`courier_pay.coefficient_used (3,2)`.
+`float`/`real` нет.
+Вердикт: OK.
+
+### B.9. Nullability `order`
+
+```sql
+SELECT count(*) FILTER (WHERE is_nullable = 'NO') AS not_null,
+       count(*) FILTER (WHERE is_nullable = 'YES') AS nullable,
+       string_agg(column_name, ', ') FILTER (WHERE is_nullable = 'YES') AS nullable_columns
+FROM information_schema.columns
+WHERE table_schema = 'prudko_food' AND table_name = 'order';
+```
+
+Ожидается: 12 `NOT NULL`, nullable — только `delivery_timestamp`.
+Факт: 12 и 1; nullable-столбец — `delivery_timestamp`.
+Вердикт: OK.
+
+### B.10. Нет последовательностей
+
+```sql
+SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'prudko_food' AND c.relkind = 'S';
+```
+
+Ожидается: 0 — все ключи `uuid` c `DEFAULT exts.uuid_generate_v4()` (BR-11.1).
+Факт: 0; `SERIAL`/`IDENTITY` в схеме не используются.
 Вердикт: OK.
 
 ---
@@ -267,6 +313,63 @@ END $$;
 Факт: без ошибок; `client = 110`, `order = 550`, `payment = 550`, `courier_pay = 660`.
 После проверки выполнены `erase_test_data()` и `insert_test_data(10)` — данные
 возвращены к каноническому виду.
+Вердикт: OK.
+
+### C.10. Покрытие значений enum
+
+```sql
+SELECT 'order_status' AS enum, status::text AS value, count(*)
+FROM "order" GROUP BY status
+UNION ALL
+SELECT 'payment_status', status::text, count(*) FROM payment GROUP BY status
+UNION ALL
+SELECT 'review_entity_type', entity_type::text, count(*) FROM review GROUP BY entity_type
+ORDER BY 1, 2;
+```
+
+Ожидается: каждое значение enum из BR встречается хотя бы один раз.
+Факт: `order_status` — все 5 значений по 10; `payment_status` — `успех 20`,
+`ошибка 20`, `в_обработке 10`; `review_entity_type` — `блюдо`, `заказ`,
+`ресторан` (17/16/17). Аналогично покрыты `restaurant_status`,
+`product_status`, `courier_status`, `order_pay_status`, `payment_type`.
+Вердикт: OK.
+
+### C.11. `order_structure` заполнен и согласован
+
+```sql
+SELECT count(*) AS rows,
+       count(DISTINCT order_id) AS orders,
+       min(quantity) AS min_qty,
+       max(quantity) AS max_qty
+FROM order_structure;
+
+SELECT count(*) AS orders_without_items
+FROM "order" o
+WHERE NOT EXISTS (SELECT 1 FROM order_structure os WHERE os.order_id = o.order_id);
+```
+
+Ожидается: `orders = 50`, `min_qty >= 1`, заказов без позиций — 0.
+Факт: 50–250 строк (1–5 блюд на заказ), `orders = 50`, `quantity` 1.000–4.000,
+`orders_without_items = 0`; в проверенном прогоне — 140 строк.
+Вердикт: OK.
+
+### C.12. Текстовые значения без искусственных префиксов
+
+```sql
+SELECT count(*) FILTER (WHERE phone_number LIKE '+79%') AS phone_prefix,
+       count(DISTINCT left(login, 1)) AS login_initials
+FROM client;
+
+SELECT count(*) FILTER (WHERE photo_url LIKE 'https://cdn.foodexpress%') AS photo_prefix,
+       count(DISTINCT left(product_name, 1)) AS product_initials
+FROM product;
+```
+
+Ожидается: ни одного префикса, начальные символы различаются.
+Факт: `phone_prefix = 0`, `photo_prefix = 0`; `login_initials` и
+`product_initials` близки к числу возможных hex-символов (например, 8 и 16).
+В генераторе нет массивов и счётчиков в бизнес-значениях: строки строятся
+через `md5`, связи — через временные таблицы `pg_temp`.
 Вердикт: OK.
 
 ---
@@ -487,8 +590,9 @@ END $$;
 ```
 
 Ожидается: ошибка с внятным сообщением.
-Факт: `Нельзя добавить блюдо: ресторан 00000000-0000-0000-0000-000000000000
-или категория … не существуют (FK)`.
+Факт: `insert or update on table "product" violates foreign key constraint
+"fk_product_restaurant"` — PostgreSQL сам называет ограничение и таблицу;
+процедура не переводит ошибку в свой текст.
 Вердикт: OK.
 
 ### E.3. `rating_change` — пересчитывает рейтинг
@@ -517,7 +621,8 @@ SELECT rating FROM product WHERE product_id = (SELECT product_id FROM rating_pro
 ```
 
 Ожидается: `rating` пересчитан.
-Факт: было 4.60, после отзыва на 5 — 4.80.
+Факт: было 3.40, после отзыва на 5 — 4.20 (точные значения зависят от
+сгенерированных данных).
 Вердикт: OK.
 
 ### E.4. `rating_change` — удаление отзыва
@@ -529,7 +634,7 @@ DROP TABLE rating_probe;
 ```
 
 Ожидается: если других отзывов нет — `NULL`; иначе — пересчитан.
-Факт: отзыв удалён, рейтинг вернулся к 4.60.
+Факт: отзыв удалён, рейтинг вернулся к прежнему значению (3.40).
 Вердикт: OK.
 
 ### E.5. `get_statistic()`
@@ -571,6 +676,66 @@ FROM courier_pay;
 
 Ожидается: количество строк не изменилось, значения не продублированы.
 Факт: контрольные суммы до и после совпадают; строк — 60.
+Вердикт: OK.
+
+### E.8. `rating_change` — UPDATE (перенос отзыва)
+
+```sql
+BEGIN;
+CREATE TEMP TABLE probe AS
+SELECT o.order_id, o.restaurant_id, o.client_id, os.product_id
+FROM "order" o
+JOIN order_structure os ON os.order_id = o.order_id
+WHERE NOT EXISTS (SELECT 1 FROM review r
+                  WHERE r.order_id = o.order_id AND r.entity_type = 'ресторан')
+  AND NOT EXISTS (SELECT 1 FROM review r
+                  WHERE r.order_id = o.order_id AND r.entity_type = 'блюдо'
+                    AND r.entity_id = os.product_id)
+LIMIT 1;
+
+INSERT INTO review (client_id, entity_id, entity_type, order_id, description, rating)
+SELECT client_id, product_id, 'блюдо', order_id, 'probe-move', 5 FROM probe;
+
+SELECT rating FROM product WHERE product_id = (SELECT product_id FROM probe);
+
+UPDATE review
+   SET entity_type = 'ресторан',
+       entity_id = (SELECT restaurant_id FROM probe),
+       rating = 1
+ WHERE description = 'probe-move';
+
+SELECT rating FROM product WHERE product_id = (SELECT product_id FROM probe);
+SELECT rating FROM restaurant WHERE restaurant_id = (SELECT restaurant_id FROM probe);
+ROLLBACK;
+```
+
+Ожидается: после `INSERT` рейтинг блюда пересчитан; после переноса отзыва
+рейтинг блюда пересчитан обратно, рейтинг ресторана — с учётом нового отзыва.
+Факт: блюдо 3.40 → 4.20 → 3.40; ресторан 3.50 → 2.67 (значения зависят от
+сгенерированных данных).
+Вердикт: OK.
+
+### E.9. `courier_salary()` — курьер без доставок
+
+```sql
+BEGIN;
+INSERT INTO courier (last_name, first_name, middle_name, phone_number,
+                     status, hire_date, coefficient)
+VALUES ('Probe', 'Probe', 'Probe', '12345678901', 'свободен', current_date - 30, 0.10)
+RETURNING courier_id AS probe_courier \gset
+
+CALL courier_salary();
+
+SELECT amount, coefficient_used FROM courier_pay
+ WHERE courier_id = :'probe_courier'
+   AND year = extract(year FROM localtimestamp)::int
+   AND month = extract(month FROM localtimestamp)::int;
+SELECT coefficient FROM courier WHERE courier_id = :'probe_courier';
+ROLLBACK;
+```
+
+Ожидается: `amount = 0.00`, `coefficient_used = 0.10`, коэффициент курьера 0.10.
+Факт: `0.00`, `0.10`, `0.10` — `LEFT JOIN` сохраняет курьера без доставок.
 Вердикт: OK.
 
 ---
@@ -773,5 +938,6 @@ CALL insert_test_data(10);
 ```
 
 Ожидается: все таблицы заполнены, FK-целостность не нарушена.
-Факт: 10, 10, 10, 10, 50, 50, 50, 50, 50; orphans в `order_structure` — 0.
+Факт: 10, 10, 10, 10, 50, 50, 50, 50, 50; `order_structure` — 50–250 строк,
+`courier_pay` — 60; orphans в `order_structure` — 0.
 Вердикт: OK.

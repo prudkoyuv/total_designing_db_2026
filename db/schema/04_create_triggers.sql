@@ -1,6 +1,16 @@
 -- ============================================================================
 -- FoodExpress / FOOD-105
 -- rating_change(): пересчёт product.rating / restaurant.rating (BR-9.6, BR-9.7).
+--
+-- Алгоритм:
+--   INSERT — пересчитать рейтинг новой сущности;
+--   UPDATE — при смене entity_type/entity_id пересчитать старую сущность,
+--            затем всегда пересчитать новую (в том числе при смене rating);
+--   DELETE — пересчитать сущность удалённого отзыва;
+--   entity_type = 'заказ' — агрегата нет, ничего не делать;
+--   нет отзывов — avg() возвращает NULL, поэтому rating становится NULL.
+-- Рекурсии нет: триггер обновляет product/restaurant, а не review.
+--
 -- Остальные проверки BR-7.3, BR-8.4, BR-8.7, BR-9.1 выполняет бэкенд;
 -- см. db/constraints.md, раздел «Граница с приложением».
 -- ============================================================================
@@ -14,6 +24,7 @@ LANGUAGE plpgsql
 SET search_path TO prudko_food, exts, public
 AS $$
 BEGIN
+    -- DELETE: отзыв удалён, пересчитываем рейтинг его сущности.
     IF TG_OP = 'DELETE' THEN
         IF OLD.entity_type = 'блюдо' THEN
             UPDATE product p
@@ -63,6 +74,7 @@ BEGIN
         END IF;
     END IF;
 
+    -- INSERT или UPDATE: пересчитываем рейтинг новой сущности отзыва.
     IF NEW.entity_type = 'блюдо' THEN
         UPDATE product p
            SET rating = (

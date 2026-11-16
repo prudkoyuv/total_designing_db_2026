@@ -83,6 +83,28 @@ BR-8.4 (сумма оплаты равна `order.total_amount`) и BR-8.7 (`ord
 по попыткам) — межтабличные проверки, их выполняет бэкенд
 (см. «Граница с приложением»).
 
+## Точность `numeric`
+
+`numeric` выбран для денег и рейтингов вместо `float`: двоичная плавающая точка
+даёт ошибки округления, а `numeric(p,s)` хранит точное десятичное значение.
+
+| Таблица | Столбец | Тип | Почему такая точность |
+|---|---|---|---|
+| `product` | `price` | `numeric(7,2)` | 5 цифр до запятой (до 99 999.99) и копейки |
+| `order` | `order_amount` | `numeric(7,2)` | стоимость блюд одного заказа в тех же пределах |
+| `order` | `commission` | `numeric(7,2)` | 10% от `order_amount`, не больше 9 999.99 |
+| `order` | `total_amount` | `numeric(8,2)` | `order_amount + commission`, до 109 999.98 |
+| `payment` | `amount` | `numeric(8,2)` | равна `order.total_amount` (BR-8.4) |
+| `courier_pay` | `amount` | `numeric(8,2)` | месячная выплата, тот же порядок величин |
+| `order_structure` | `quantity` | `numeric(6,3)` | 3 цифры после запятой — граммы/доли порции |
+| `product`, `restaurant` | `rating` | `numeric(3,2)` | среднее отзывов с округлением до 0.01, диапазон `0..5` |
+| `review` | `rating` | `numeric(2,1)` | оценка клиента `1..5` с шагом 0.1 |
+| `courier`, `courier_pay` | `coefficient`, `coefficient_used` | `numeric(3,2)` | 0.10 … 0.50 |
+
+`total_amount` на разряд шире `order_amount`, потому что включает комиссию;
+запас в 5–6 целых цифр покрывает любой реалистичный заказ и не создаёт
+искусственного ограничения снизу.
+
 ## UNIQUE-ограничения
 
 | Таблица | Столбцы | BR | Обоснование |
@@ -125,6 +147,10 @@ BR-8.4 (сумма оплаты равна `order.total_amount`) и BR-8.7 (`ord
 | `order` | `description` | BR-11.3 | всё, что не разрешено как `NULL`, обязательно |
 | `restaurant` | `inn`, `ogrn`, `bank_account` | BR-4.5 | реквизиты входят в описание ресторана |
 
+В `order` 12 столбцов объявлены `NOT NULL`; единственный nullable —
+`delivery_timestamp`. Остальные таблицы следуют тому же правилу BR-11.3:
+`NOT NULL` у всех обязательных бизнес-атрибутов, `NULL` — только в таблице ниже.
+
 ## NULL (осознанно разрешено)
 
 | Таблица | Столбец | BR | Почему NULL |
@@ -153,25 +179,66 @@ BR-8.4 (сумма оплаты равна `order.total_amount`) и BR-8.7 (`ord
 | `order` | `pay_status` | `DEFAULT 'ожидает'` | BR-7.9, BR-8.7; далее вычисляется бэкендом |
 | `payment` | `status` | `DEFAULT 'в_обработке'` | BR-8.2 |
 | `order` | `commission` | `GENERATED ALWAYS AS (round(order_amount * 0.10, 2)) STORED` | BR-1.4: 10% нельзя рассинхронизировать |
-| `order` | `total_amount` | `GENERATED ALWAYS AS (order_amount + commission) STORED` | BR-7.10: сумма = стоимость + комиссия |
+| `order` | `total_amount` | `GENERATED ALWAYS AS (round(order_amount + round(order_amount * 0.10, 2), 2)) STORED` | BR-7.10: сумма = стоимость + комиссия |
 
-## Нормализация (3НФ)
+## Нормализация (1НФ, 2НФ, 3НФ)
 
-Все таблицы в 3НФ: неключевые атрибуты зависят от полного первичного ключа (2НФ),
-транзитивных зависимостей нет (3НФ). `restaurant.inn/ogrn/bank_account` (BR-4.5) и
-`courier.last_name/first_name/middle_name` (BR-6.1) разложены на атомарные атрибуты.
+Все таблицы в 3НФ:
 
-Особые случаи:
+- **1НФ** — каждый столбец атомарен: ФИО курьера разложено на `last_name`,
+  `first_name`, `middle_name` (BR-6.1), реквизиты ресторана — на `inn`, `ogrn`,
+  `bank_account` (BR-4.5). Повторяющихся групп нет: позиции заказа вынесены
+  в `order_structure`, адреса клиента — в `client_address`, попытки оплаты —
+  в `payment`, отзывы — в `review`.
+- **2НФ** — неключевые атрибуты зависят от полного первичного ключа. Составные
+  ключи есть только у `client_address (client_id, address_id)`,
+  `order_structure (order_id, product_id)` и `review (order_id, entity_type,
+  entity_id)`; в них нет атрибутов, зависящих от части ключа.
+- **3НФ** — транзитивных зависимостей нет. `order.commission` и
+  `order.total_amount` не хранят независимые значения, а вычисляются из
+  `order_amount` через `GENERATED ALWAYS`; `product.rating` и
+  `restaurant.rating` — агрегаты отзывов, которые поддерживает триггер
+  `rating_change` (BR-9.6, BR-9.7). Это осознанная денормализация ради чтения,
+  а не нарушение 3НФ: значение выводится из `review`.
 
-- `order.commission` и `order.total_amount` — вычисляемые, `GENERATED ALWAYS`;
-  вручную не хранятся (BR-1.4, BR-7.10). `order.order_amount` фиксируется при
-  оформлении заказа и рассчитывается приложением по позициям.
-- `product.rating` и `restaurant.rating` — агрегаты, поддерживаются триггером
-  `rating_change` (BR-9.6, BR-9.7). Это осознанная денормализация ради чтения.
-- `review.entity_type` + `entity_id` — полиморфизм, 3НФ не нарушает (ловушка 4).
+`review.entity_type` + `entity_id` — полиморфная ссылка, 3НФ не нарушает
+(ловушка 4).
 
 Дополнительных индексов нет: BR-11.8 не оценивает оптимизацию индексами, остаются
 индексы PK/UNIQUE и частичный `uq_payment_success_per_order` (BR-8.1).
+
+## Ключи и последовательности
+
+Все первичные ключи — `uuid` с `DEFAULT exts.uuid_generate_v4()` (BR-11.1).
+`SERIAL`/`IDENTITY` и последовательности не используются: в схеме нет объектов
+`relkind = 'S'`. Это упрощает объединение данных из разных баз и не раскрывает
+количество строк.
+
+## Процедуры и функции
+
+| Объект | Назначение | FOOD | Ключевая логика |
+|---|---|---|---|
+| `insert_test_data(value)` | заполнение тестовыми данными | FOOD-102 | временные таблицы `pg_temp` вместо массивов; тексты через `md5` |
+| `erase_test_data()` | очистка всех таблиц | FOOD-103 | `TRUNCATE ... CASCADE` |
+| `add_product(...)` | добавление блюда | FOOD-104 | один `INSERT`; целостность — ограничения `product` |
+| `rating_change()` + `trg_rating_change` | пересчёт рейтингов | FOOD-105 | `INSERT`/`UPDATE`/`DELETE` отзыва, `avg()` |
+| `get_statistic()` | статистика по ресторанам | FOOD-106 | `delivered` + `DISTINCT ON`, `"order"` читается один раз |
+| `courier_salary()` | зарплата курьеров за месяц | FOOD-107 | `MATERIALIZED` + `LEFT JOIN`, нулевые доставки дают 0.00 |
+| `how_much_money` | помесячный финансовый отчёт | FOOD-108 | представление; суммы, комиссия и выплаты курьерам по месяцам |
+
+`add_product` не проверяет входные данные вручную: `NOT NULL`, FK, `CHECK`,
+`varchar(N)` и `numeric(p,s)` сами возвращают ошибку PostgreSQL с именем
+ограничения и проблемным ключом. Приложение не переводит эти ошибки в свой
+текст.
+
+## Права `inspector`
+
+`grants.sql` создаёт роль только если её ещё нет, и задаёт пароль только при
+создании — пароль существующей роли не меняется. Роли выданы `ALL` на схему,
+таблицы и процедуры `prudko_food`, а также `USAGE` на `exts`.
+`ALTER DEFAULT PRIVILEGES` не нужен: гранты выдаются после восстановления схемы,
+когда все объекты уже существуют. Временные таблицы `insert_test_data` живут
+в `pg_temp` и не требуют прав на `prudko_food`.
 
 ## Граница с приложением
 
