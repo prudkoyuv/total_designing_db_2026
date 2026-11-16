@@ -4,8 +4,8 @@
 
 | Параметр | Значение |
 |---|---|
-| PostgreSQL version | `PostgreSQL 18.7 (Debian 18.7-1.pgdg13+2) on x86_64-pc-linux-gnu` |
-| Дата проверки | 2026-11-15 |
+| PostgreSQL version | `PostgreSQL 18.4 (Debian 18.4-1.pgdg12+1) on x86_64-pc-linux-gnu` |
+| Дата проверки | 2026-11-16 |
 | Схема | `prudko_food` |
 | Роль-аудитор | `inspector` |
 
@@ -24,8 +24,8 @@ psql -d foodexpress_restore -f grants.sql
 
 Ожидается: без ошибок; архив содержит только схему.
 Факт: восстановлено в пустую БД с заранее созданными `exts` и `uuid-ossp` (BR-13.3).
-В TOC только объекты схемы: 1 `SCHEMA`, 12 `TABLE`, 8 `TYPE`, 13 `FUNCTION`/`PROCEDURE`
-(9 + 4), 9 `TRIGGER`, 1 `VIEW`, 1 `INDEX`; записей `DATABASE`, `EXTENSION`, `TABLE DATA` нет.
+В TOC только объекты схемы: 1 `SCHEMA`, 12 `TABLE`, 8 `TYPE`, 6 `FUNCTION`/`PROCEDURE`
+(2 + 4), 1 `TRIGGER`, 1 `VIEW`, 1 `INDEX`; записей `DATABASE`, `EXTENSION`, `TABLE DATA` нет.
 Владелец объектов — `pg_database_owner`, зависимость от роли разработчика отсутствует.
 Вердикт: OK.
 
@@ -358,8 +358,8 @@ WHERE p.restaurant_id <> o.restaurant_id;
 ```
 
 Ожидается: 0.
-Факт: 0. Дополнительно проверено: `UPDATE product.restaurant_id` для блюда из
-заказа и `DELETE` блюда/ресторана с отзывом отклоняются триггерами.
+Факт: 0. BR-7.3 обеспечивается бэкендом при сборке заказа; в БД межтабличная
+проверка не дублируется (см. `constraints.md`, «Граница с приложением»).
 Вердикт: OK.
 
 ### D.8. Не больше одной успешной оплаты (BR-8.1)
@@ -372,7 +372,8 @@ SELECT count(*) FROM (
 
 Ожидается: 0.
 Факт: 0. Статусы оплаты заказа: `оплачен 20`, `ошибка 10`, `ожидает 20` — все
-значения BR-8.7 достижимы.
+значения BR-8.7 достижимы; `order.pay_status` выставляет генератор по сценарию
+оплат (BR-8.7 на бэкенде).
 Вердикт: OK.
 
 ### D.9. Сумма оплаты = `total_amount` (BR-8.4)
@@ -383,7 +384,8 @@ WHERE p.amount <> o.total_amount;
 ```
 
 Ожидается: 0.
-Факт: 0.
+Факт: 0. Сумма выставляется генератором/бэкендом; в БД межтабличная проверка
+BR-8.4 не дублируется.
 Вердикт: OK.
 
 ### D.10. Нет дубликатов в `client_address` (BR-2.5)
@@ -515,7 +517,7 @@ SELECT rating FROM product WHERE product_id = (SELECT product_id FROM rating_pro
 ```
 
 Ожидается: `rating` пересчитан.
-Факт: было 3.60 (один отзыв), после отзыва на 5 — 4.30.
+Факт: было 4.60, после отзыва на 5 — 4.80.
 Вердикт: OK.
 
 ### E.4. `rating_change` — удаление отзыва
@@ -527,7 +529,7 @@ DROP TABLE rating_probe;
 ```
 
 Ожидается: если других отзывов нет — `NULL`; иначе — пересчитан.
-Факт: отзыв удалён, рейтинг вернулся к 3.60.
+Факт: отзыв удалён, рейтинг вернулся к 4.60.
 Вердикт: OK.
 
 ### E.5. `get_statistic()`
@@ -619,8 +621,8 @@ FROM how_much_money;
 ```
 
 Ожидается: все 0.
-Факт: все 0. Например, 2026-06: `3026.00 = 33285.94 - 30259.94`, `prev_commission`
-NULL, `net_profit = 2723.40`.
+Факт: все 0. Например, 2026-06: `2636.43 = 29000.73 - 26364.30`, `prev_commission`
+NULL, `net_profit = 2372.79`.
 Вердикт: OK.
 
 ---
@@ -696,7 +698,7 @@ EXPLAIN (ANALYZE, COSTS OFF) SELECT * FROM get_statistic();
 ```
 
 Ожидается: без повторных сканов `"order"`.
-Факт: `Function Scan on get_statistic`, 10 строк, 7.2 мс. В теле функции `"order"`
+Факт: `Function Scan on get_statistic`, 10 строк, 7.8 мс. В теле функции `"order"`
 читается один раз (материализованный CTE `delivered`), лучшие блюдо и клиент
 выбираются через `DISTINCT ON` без оконных функций.
 Вердикт: OK.
@@ -714,7 +716,7 @@ GROUP BY c.courier_id;
 ```
 
 Ожидается: один `Hash Right Join`, один скан `"order"`, время меньше, чем в H.1.
-Факт: `HashAggregate → Hash Right Join → Seq Scan on "order"` (один скан), 0.4 мс.
+Факт: `HashAggregate → Hash Right Join → Seq Scan on "order"` (один скан), 0.08 мс.
 Вердикт: OK.
 
 ### H.3. Применить к `get_statistic`

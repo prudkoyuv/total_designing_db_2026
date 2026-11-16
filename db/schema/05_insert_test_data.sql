@@ -71,6 +71,7 @@ DECLARE
     v_delivery_ts timestamp;
     v_review_ts timestamp;
     v_order_status order_status;
+    v_pay_status order_pay_status;
 
     v_entity_type review_entity_type;
     v_entity_id uuid;
@@ -385,9 +386,19 @@ BEGIN
             END LOOP;
         END IF;
 
+        -- BR-8.7: pay_status вычисляется приложением; генератор выставляет его
+        -- по тому же сценарию, что и попытки оплаты ниже.
+        v_pay_status := CASE (i - 1) % 5
+            WHEN 1 THEN 'оплачен'
+            WHEN 2 THEN 'оплачен'
+            WHEN 3 THEN 'ошибка'
+            ELSE 'ожидает'
+        END;
+
         INSERT INTO "order" (
             courier_id, client_id, address_id, restaurant_id,
-            order_timestamp, delivery_timestamp, order_amount, status, description
+            order_timestamp, delivery_timestamp, order_amount,
+            status, pay_status, description
         )
         VALUES (
             v_active_couriers[v_courier_idx],
@@ -398,6 +409,7 @@ BEGIN
             v_delivery_ts,
             v_order_amount,
             v_order_status,
+            v_pay_status,
             left(repeat(substring('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
                                   1, 1 + floor(random() * 33)::int),
                        1 + floor(random() * 4)::int), 200)
