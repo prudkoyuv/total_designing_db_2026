@@ -381,10 +381,19 @@ WHERE s.rating IS DISTINCT FROM (SELECT round(avg(r.rating), 2) FROM review r
 
 ```sql
 SELECT count(*) FROM product;  -- before
-CALL add_product(
-    (SELECT restaurant_id FROM restaurant LIMIT 1),
-    (SELECT product_category_id FROM product_category LIMIT 1),
-    'Тестовое блюдо', 250, 'Описание');
+
+-- CALL не принимает подзапросы в аргументах, поэтому значения
+-- выбираются в DO-блоке.
+DO $$
+DECLARE
+    v_restaurant uuid;
+    v_category   uuid;
+BEGIN
+    SELECT restaurant_id INTO v_restaurant FROM restaurant LIMIT 1;
+    SELECT product_category_id INTO v_category FROM product_category LIMIT 1;
+    CALL add_product(v_restaurant, v_category, 'Тестовое блюдо', 250, 'Описание');
+END $$;
+
 SELECT count(*) FROM product;  -- after
 ```
 
@@ -394,9 +403,14 @@ SELECT count(*) FROM product;  -- after
 ### E.2. `add_product` — несуществующий ресторан
 
 ```sql
-CALL add_product('00000000-0000-0000-0000-000000000000',
-                 (SELECT product_category_id FROM product_category LIMIT 1),
-                 'Плохое блюдо', 100, 'Описание');
+DO $$
+DECLARE
+    v_category uuid;
+BEGIN
+    SELECT product_category_id INTO v_category FROM product_category LIMIT 1;
+    CALL add_product('00000000-0000-0000-0000-000000000000', v_category,
+                     'Плохое блюдо', 100, 'Описание');
+END $$;
 ```
 
 Ожидается: ошибка FK.
