@@ -103,7 +103,7 @@ CREATE TABLE product (
     product_id          uuid           NOT NULL DEFAULT exts.uuid_generate_v4(),
     product_name        varchar(100)   NOT NULL,
     product_category_id uuid           NOT NULL,
-    price               numeric(7,2)   NOT NULL,
+    price               numeric(6,2)   NOT NULL,
     restaurant_id       uuid           NOT NULL,
     photo_url           text,
     rating              numeric(3,2),
@@ -154,7 +154,7 @@ CREATE TABLE "order" (
 CREATE TABLE order_structure (
     order_id   uuid          NOT NULL,
     product_id uuid          NOT NULL,
-    quantity   numeric(6,3)  NOT NULL,
+    quantity   numeric(4,3)  NOT NULL,
     CONSTRAINT pk_order_structure PRIMARY KEY (order_id, product_id),
     CONSTRAINT fk_order_structure_order FOREIGN KEY (order_id)
         REFERENCES "order" (order_id) ON DELETE CASCADE,
