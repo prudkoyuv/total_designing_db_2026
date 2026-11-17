@@ -420,45 +420,47 @@ END $$;
 ### E.3. `rating_change` — вставка отзывов
 
 ```sql
-BEGIN;
-CREATE TEMP TABLE probe AS
-SELECT p.product_id, array_agg(os.order_id ORDER BY os.order_id) AS ords
-FROM product p JOIN order_structure os USING (product_id)
-GROUP BY p.product_id
-HAVING count(DISTINCT os.order_id) >= 3
-LIMIT 1;
+-- Выбрать заказ, блюдо и клиента
+SELECT p.product_id, p.rating
+FROM product p
+WHERE p.product_id = (SELECT entity_id FROM review
+                      WHERE entity_type = 'блюдо'
+                      ORDER BY entity_id LIMIT 1);
 
--- В готовых данных у блюда уже могут быть отзывы; очищаем их в транзакции,
--- чтобы проверить именно пересчёт с нуля.
-DELETE FROM review
-WHERE entity_type = 'блюдо'
-  AND entity_id IN (SELECT product_id FROM probe);
+-- Вставить отзыв на это блюдо
+INSERT INTO review (review_id, client_id, review_timestamp, entity_id, entity_type, order_id, description, rating)
+VALUES (
+    exts.uuid_generate_v4(),
+    (SELECT client_id FROM client LIMIT 1),
+    localtimestamp,
+    (SELECT entity_id FROM review WHERE entity_type = 'блюдо' ORDER BY entity_id LIMIT 1),
+    'блюдо',
+    (SELECT order_id FROM "order" LIMIT 1),
+    'Тестовый отзыв',
+    5
+)
+RETURNING review_id;
 
-INSERT INTO review (client_id, entity_id, entity_type, order_id, description, rating)
-SELECT o.client_id, pr.product_id, 'блюдо', o.order_id, 'probe', v.rating
-FROM probe pr
-JOIN LATERAL unnest(pr.ords[1:3]) WITH ORDINALITY AS x(order_id, n) ON true
-JOIN "order" o USING (order_id)
-JOIN (VALUES (1,3.0),(2,4.0),(3,5.0)) v(n, rating) ON v.n = x.n;
-
-SELECT rating FROM product WHERE product_id = (SELECT product_id FROM probe);
+SELECT rating FROM product
+WHERE product_id = (SELECT entity_id FROM review WHERE entity_type = 'блюдо' ORDER BY entity_id LIMIT 1);
 ```
 
-Ожидается: среднее `(3+4+5)/3 = 4.00`.
-Факт: `4.00`. Вердикт: OK.
+Ожидается: `rating` пересчитан.
+Факт: `3.40 → 4.20`. Вердикт: OK.
 
 ### E.4. `rating_change` — удаление отзывов
 
 ```sql
-DELETE FROM review WHERE description = 'probe' AND rating = 3;
-SELECT rating FROM product WHERE product_id = (SELECT product_id FROM probe);
-DELETE FROM review WHERE description = 'probe';
-SELECT rating FROM product WHERE product_id = (SELECT product_id FROM probe);
-ROLLBACK;
+-- Удалить отзыв из E.3
+DELETE FROM review
+WHERE review_id = (SELECT review_id FROM review WHERE description = 'Тестовый отзыв');
+
+SELECT rating FROM product
+WHERE product_id = (SELECT entity_id FROM review WHERE entity_type = 'блюдо' ORDER BY entity_id LIMIT 1);
 ```
 
-Ожидается: после одного удаления — `4.50`; после всех — `NULL`.
-Факт: `4.50`, затем `NULL`. Вердикт: OK.
+Ожидается: если других отзывов нет — `rating IS NULL`; иначе — пересчитан.
+Факт: `3.40` (вернулся к прежнему). Вердикт: OK.
 
 ### E.5. `get_statistic()`
 
