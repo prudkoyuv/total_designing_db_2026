@@ -39,7 +39,8 @@ SELECT current_user;
 ```
 
 Ожидается: `inspector`.
-Факт: `inspector`.
+Факт: `inspector`. Проверки идут через `SET ROLE`, поэтому пароль уже
+существующей роли не важен: `grants.sql` его не меняет (см. `constraints.md`).
 Вердикт: OK.
 
 ---
@@ -189,15 +190,15 @@ SELECT count(*) FROM courier WHERE status <> 'уволен';
 
 Ожидается: `>= 1`. Факт: 8. Вердикт: OK.
 
-### C.8. `courier_pay` по доставкам месяца (BR-10.2)
+### C.8. `courier_pay` по заказам месяца (BR-10.2)
 
 ```sql
 SELECT count(*) FROM courier_pay cp
 WHERE cp.amount <> round(coalesce((
     SELECT sum(o.commission) FROM "order" o
     WHERE o.courier_id = cp.courier_id AND o.status = 'доставлен'
-      AND extract(year FROM o.delivery_timestamp) = cp.year
-      AND extract(month FROM o.delivery_timestamp) = cp.month
+      AND extract(year FROM o.order_timestamp) = cp.year
+      AND extract(month FROM o.order_timestamp) = cp.month
 ), 0) * cp.coefficient_used, 2);
 ```
 
@@ -206,12 +207,32 @@ WHERE cp.amount <> round(coalesce((
 ### C.9. Повторный вызов
 
 ```sql
+BEGIN;
 CALL insert_test_data(10);
+SELECT (SELECT count(*) FROM client) AS clients,
+       (SELECT count(*) FROM "order") AS orders,
+       (SELECT count(*) FROM payment) AS payments,
+       (SELECT count(*) FROM review) AS reviews;
+ROLLBACK;
 ```
 
-Ожидается: без ошибок; данные добавляются.
-Факт: без ошибок; стало 20 клиентов, 100 заказов, 100 платежей, 100 отзывов.
+Ожидается: без ошибок; в транзакции данные добавляются, после `ROLLBACK`
+состояние прежнее.
+Факт: 20 клиентов, 100 заказов, 100 платежей, 100 отзывов; после `ROLLBACK` —
+10/50/50/50.
 Вердикт: OK.
+
+### C.10. `photo_url` — настоящий URL (BR-5.6, BR-9.3)
+
+```sql
+SELECT count(*) FROM product
+WHERE photo_url IS NOT NULL AND photo_url !~ '^https://'
+UNION ALL
+SELECT count(*) FROM review
+WHERE photo_url IS NOT NULL AND photo_url !~ '^https://';
+```
+
+Ожидается: 0, 0. Факт: 0, 0. Вердикт: OK.
 
 ---
 
@@ -286,10 +307,10 @@ WHERE p.restaurant_id <> o.restaurant_id;
 
 ```sql
 SELECT order_id, count(*) FROM payment WHERE status = 'успех'
-GROUP BY order_id HAVING count(*) > 1;
+GROUP BY order_id HAVING count(*) != 1;
 ```
 
-Ожидается: пусто — больше одной успешной попытки нет.
+Ожидается: пусто — успешных попыток не больше одной на заказ.
 Факт: пусто. У части заказов ноль успешных попыток: единственная попытка
 завершилась `'ошибка'` или `'в_обработке'` (BR-8.7). Это противоречие BR-8.1
 и BR-8.7 при фиксированном BR-11.7 (`payment = value * 5`) разобрано в
@@ -389,11 +410,15 @@ BEGIN;
 CREATE TEMP TABLE probe AS
 SELECT p.product_id, array_agg(os.order_id ORDER BY os.order_id) AS ords
 FROM product p JOIN order_structure os USING (product_id)
-WHERE NOT EXISTS (SELECT 1 FROM review r
-                  WHERE r.entity_type = 'блюдо' AND r.entity_id = p.product_id)
 GROUP BY p.product_id
 HAVING count(DISTINCT os.order_id) >= 3
 LIMIT 1;
+
+-- В готовых данных у блюда уже могут быть отзывы; очищаем их в транзакции,
+-- чтобы проверить именно пересчёт с нуля.
+DELETE FROM review
+WHERE entity_type = 'блюдо'
+  AND entity_id IN (SELECT product_id FROM probe);
 
 INSERT INTO review (client_id, entity_id, entity_type, order_id, description, rating)
 SELECT o.client_id, pr.product_id, 'блюдо', o.order_id, 'probe', v.rating
@@ -440,8 +465,9 @@ ORDER BY year DESC, month DESC LIMIT 5;
 ```
 
 Ожидается: коэффициент пересчитан для работающих; у уволенных — 0.10;
-`courier_pay` содержит текущий месяц.
-Факт: 60 строк за 6 месяцев; уволенные не изменились. Вердикт: OK.
+у работающих `courier_pay` содержит текущий месяц, после увольнения строк нет.
+Факт: у работающих по 6 месяцев, у уволенных — по месяц увольнения
+включительно; строк после увольнения нет. Вердикт: OK.
 
 ### E.7. `courier_salary()` — повторный вызов
 
@@ -450,7 +476,7 @@ CALL courier_salary();
 ```
 
 Ожидается: идемпотентно, без дублей.
-Факт: `courier_pay` не изменился (60 строк), коэффициенты те же. Вердикт: OK.
+Факт: `courier_pay` не изменился (число строк и суммы те же), коэффициенты те же. Вердикт: OK.
 
 ---
 

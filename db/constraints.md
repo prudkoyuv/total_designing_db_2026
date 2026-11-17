@@ -130,7 +130,6 @@ BR-8.4 (сумма попытки равна `order.total_amount`) и BR-8.7 (`o
 | `review` | `description`, `rating` | BR-9.3, BR-9.4 | текст и оценка отзыва |
 
 Остальные `NOT NULL` — PK/FK и обязательные атрибуты ERD по BR-11.3.
-В `order` 12 `NOT NULL`; nullable только `delivery_timestamp` (BR-7.12).
 
 ## NULL (осознанно разрешено)
 
@@ -185,15 +184,16 @@ BR-8.4 (сумма попытки равна `order.total_amount`) и BR-8.7 (`o
 ## Точность `numeric`
 
 `numeric` выбран вместо `float`: деньги и рейтинги должны быть точными.
-Ширина типа следует из допустимого диапазона, а не «на всякий случай».
+Ширина `order_amount` выведена из максимумов: 5 позиций (BR-7.14) ×
+9 999.99 ₽ (`price`) × 9.999 (`quantity`) = 499 949.50 ₽.
 
 | Таблица | Столбец | Тип | Почему |
 |---|---|---|---|
 | `product` | `price` | `numeric(6,2)` | до 9 999.99 ₽ за блюдо |
 | `order_structure` | `quantity` | `numeric(4,3)` | до 9.999 порции/кг |
-| `order` | `order_amount` | `numeric(7,2)` | до 99 999.99 ₽ — стоимость блюд заказа |
-| `order` | `commission` | `numeric(7,2)` | 10% от `order_amount`, максимум 10 000.00 |
-| `order` | `total_amount` | `numeric(8,2)` | `order_amount + commission`, максимум 109 999.99 |
+| `order` | `order_amount` | `numeric(8,2)` | до 999 999.99 ₽; максимум 499 949.50 ₽ по BR-7.14, BR-7.15 |
+| `order` | `commission` | `numeric(7,2)` | 10% от `order_amount`, максимум 49 994.95 |
+| `order` | `total_amount` | `numeric(8,2)` | `order_amount + commission`, максимум 549 944.45 |
 | `payment` | `amount` | `numeric(8,2)` | равна `order.total_amount` (BR-8.4) |
 | `courier_pay` | `amount` | `numeric(8,2)` | месячная выплата, до 999 999.99 |
 | `product`, `restaurant` | `rating` | `numeric(3,2)` | среднее 0..5 с точностью 0.01 |
@@ -211,11 +211,11 @@ BR-8.4 (сумма попытки равна `order.total_amount`) и BR-8.7 (`o
 | Объект | FOOD | Что делает |
 |---|---|---|
 | `erase_test_data()` | FOOD-103 | `TRUNCATE ... CASCADE`; объекты схемы не трогает |
-| `insert_test_data(value)` | FOOD-102 | 1n/5n по BR-11.7; массивы ID, один проход, 6 месяцев `courier_pay` |
+| `insert_test_data(value)` | FOOD-102 | 1n/5n по BR-11.7; массивы ID, один проход, до 6 месяцев `courier_pay` |
 | `add_product(...)` | FOOD-104 | один `INSERT`; целостность — ограничения `product` |
 | `rating_change()` + `trg_rating_change` | FOOD-105 | `INSERT`/`UPDATE`/`DELETE` отзыва; `avg()`; нет отзывов — `NULL`; `'заказ'` не агрегируется |
 | `get_statistic()` | FOOD-106 | только `'доставлен'`; один скан `"order"`; `DISTINCT ON`, `random()` — tie-break |
-| `courier_salary()` | FOOD-107 | текущий месяц по `delivery_timestamp`; один скан; `LEFT JOIN`; идемпотентен |
+| `courier_salary()` | FOOD-107 | текущий месяц по `order_timestamp`; один скан; `LEFT JOIN`; идемпотентен |
 | `how_much_money` | FOOD-108 | рекурсивный CTE месяцев, `LAG`, суммы и чистая прибыль |
 
 `insert_test_data` не вызывает `courier_salary`, `add_product` и
@@ -223,16 +223,20 @@ BR-8.4 (сумма попытки равна `order.total_amount`) и BR-8.7 (`o
 это работа схемы, а не вызов бизнес-процедуры из генератора.
 
 `courier_salary` не падает при нуле доставок: `LEFT JOIN` даёт `amount = 0`,
-коэффициент остаётся 0.10. Уволенным коэффициент на следующий месяц не
-назначается (BR-10.6). Повторный вызов обновляет запись, а не дублирует её.
+коэффициент остаётся 0.10. Уволенным до текущего месяца запись не создаётся,
+коэффициент на следующий месяц не назначается (BR-10.6). Повторный вызов
+обновляет запись, а не дублирует её.
 
 ## Права `inspector`
 
 `grants.sql` создаёт роль только если её нет; пароль существующей роли не
-меняется. Гранты выдаются после восстановления схемы, когда объекты уже
-существуют, поэтому `ALTER DEFAULT PRIVILEGES` не нужен. `ALL PRIVILEGES`
-включает `TRUNCATE` (для `erase_test_data`) и `UPDATE` (для триггера
-`rating_change`). `USAGE` на `exts` нужен для `uuid_generate_v4()`.
+меняется. Если роль уже была создана с другим паролем, вход `psql -U inspector`
+с `NetoSQL2025` не сработает — используйте `SET ROLE inspector` от суперпользователя
+или задайте пароль роли вручную. Гранты выдаются после восстановления схемы,
+когда объекты уже существуют, поэтому `ALTER DEFAULT PRIVILEGES` не нужен.
+`ALL PRIVILEGES` включает `TRUNCATE` (для `erase_test_data`) и `UPDATE`
+(для триггера `rating_change`). `USAGE` на `exts` нужен для
+`uuid_generate_v4()`.
 
 ## Граница с приложением
 

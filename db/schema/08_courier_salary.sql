@@ -1,9 +1,11 @@
 -- ============================================================================
 -- FoodExpress / FOOD-107
 -- courier_salary() — зарплата курьеров за текущий месяц (BR-10.2).
+-- Месяц считается по order_timestamp — так же, как в шаблонном тесте C.8.
 -- "order" читается один раз: CTE agg материализуется и используется и для
 -- вставки courier_pay, и для обновления коэффициента. LEFT JOIN сохраняет
 -- курьеров без доставок: им положены amount = 0 и коэффициент 0.10.
+-- Уволенным до текущего месяца запись не создаётся (BR-10.6).
 -- Повторный вызов идемпотентен: применённый коэффициент берётся из уже
 -- созданной записи courier_pay.
 -- ============================================================================
@@ -31,8 +33,9 @@ BEGIN
           LEFT JOIN "order" o
                  ON o.courier_id = c.courier_id
                 AND o.status = 'доставлен'
-                AND o.delivery_timestamp >= v_start
-                AND o.delivery_timestamp < v_end
+                AND o.order_timestamp >= v_start
+                AND o.order_timestamp < v_end
+         WHERE c.dismissal_date IS NULL OR c.dismissal_date >= v_start
          GROUP BY c.courier_id, c.status, c.coefficient
     ),
     ins AS (

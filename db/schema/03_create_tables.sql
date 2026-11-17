@@ -127,7 +127,7 @@ CREATE TABLE "order" (
     restaurant_id      uuid              NOT NULL,
     order_timestamp    timestamp         NOT NULL DEFAULT localtimestamp,
     delivery_timestamp timestamp,
-    order_amount       numeric(7,2)      NOT NULL,
+    order_amount       numeric(8,2)      NOT NULL,
     commission         numeric(7,2)      NOT NULL GENERATED ALWAYS AS (round(order_amount * 0.10, 2)) STORED,
     total_amount       numeric(8,2)      NOT NULL GENERATED ALWAYS AS (round(order_amount + round(order_amount * 0.10, 2), 2)) STORED,
     status             order_status      NOT NULL DEFAULT 'создан',

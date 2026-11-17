@@ -5,12 +5,16 @@
 -- Распределение строк — BR-11.7: value строк для client, courier,
 -- product_category, restaurant; value * 5 для address, product, order,
 -- review, payment. Адреса: value под рестораны, value * 4 под клиентов.
--- courier_pay — 6 месяцев на каждого курьера (BR-10.7).
+-- courier_pay — 6 месяцев на каждого курьера, но не позже месяца
+-- увольнения (BR-10.6, BR-10.7).
 --
 -- Связи хранятся в массивах ID, а не в temp-таблицах: генератор не создаёт
 -- объектов в схеме и не делает ORDER BY random() LIMIT 1 в цикле
 -- (samples/all_examples.sql, раздел 7). Строки собираются из букв алфавита;
 -- счётчиков, префиксов и повторяющихся шаблонов в бизнес-значениях нет.
+--
+-- Отзывы создаются только по доставленным заказам (BR-9.2): по 3 отзыва на
+-- разные блюда заказа + отзыв о ресторане + отзыв о заказе (BR-9.5).
 --
 -- BR-8.1 («ровно одна успешная попытка») и BR-8.7 (статусы «ошибка»,
 -- «ожидает») несовместимы при фиксированном BR-11.7 количестве payment =
@@ -307,6 +311,13 @@ BEGIN
         v_order_ts := v_month_start + (v_month_end - v_month_start) * random();
 
         IF v_status = 'доставлен' THEN
+            -- Доставка не должна переходить в следующий месяц: зарплата
+            -- считается по order_timestamp, а how_much_money — по
+            -- delivery_timestamp; иначе месяцы разойдутся.
+            v_order_ts := greatest(
+                v_month_start,
+                least(v_order_ts, v_month_end - interval '2 hours')
+            );
             v_delivery_ts := least(
                 v_order_ts + make_interval(mins => 20 + floor(random() * 60)::int),
                 localtimestamp
@@ -319,6 +330,9 @@ BEGIN
         -- количество 1..4 (BR-7.15). Сумма доводится до 909.10, чтобы
         -- total_amount с комиссией был не меньше 1000 ₽ (BR-7.11).
         v_item_count := 1 + floor(random() * 5)::int;
+        IF v_status = 'доставлен' AND v_item_count < 3 THEN
+            v_item_count := 3;  -- три разных блюда для отзывов (BR-9.5)
+        END IF;
         v_start := 1 + floor(random() * 5)::int;
         v_item_ids := ARRAY[]::uuid[];
         v_item_qty := ARRAY[]::numeric[];
@@ -398,49 +412,57 @@ BEGIN
             v_payment_status
         );
 
-        -- BR-9.2: отзыв связан с заказом клиента и его объектом.
-        v_entity_type := (enum_range(NULL::review_entity_type))[1 + ((i - 1) % 3)];
-        IF v_entity_type = 'блюдо' THEN
-            v_entity_id := v_item_ids[
-                1 + floor(random() * array_length(v_item_ids, 1))::int
-            ];
-        ELSIF v_entity_type = 'ресторан' THEN
-            v_entity_id := v_restaurant_ids[v_restaurant_ord];
-        ELSE
-            v_entity_id := v_uuid;
+        -- BR-9.2: отзывы оставляют только по доставленным заказам.
+        -- BR-9.5: 3 отзыва о разных блюдах заказа + отзыв о ресторане +
+        -- отзыв о заказе = 5 отзывов на доставленный заказ (value * 5 всего).
+        IF v_status = 'доставлен' THEN
+            FOR j IN 1..5 LOOP
+                v_entity_type := CASE
+                    WHEN j <= 3 THEN 'блюдо'::review_entity_type
+                    WHEN j = 4 THEN 'ресторан'::review_entity_type
+                    ELSE 'заказ'::review_entity_type
+                END;
+                v_entity_id := CASE
+                    WHEN j <= 3 THEN v_item_ids[j]
+                    WHEN j = 4 THEN v_restaurant_ids[v_restaurant_ord]
+                    ELSE v_uuid
+                END;
+                v_rating := round((1 + random() * 4)::numeric, 1);
+                v_review_ts := least(
+                    v_delivery_ts
+                        + make_interval(hours => 1 + floor(random() * 48)::int),
+                    localtimestamp
+                );
+
+                INSERT INTO review (
+                    client_id, review_timestamp, entity_id, entity_type,
+                    order_id, description, photo_url, rating
+                )
+                VALUES (
+                    v_client_ids[v_client_ord],
+                    v_review_ts,
+                    v_entity_id,
+                    v_entity_type,
+                    v_uuid,
+                    (SELECT string_agg(substr(v_alphabet, 1 + floor(random() * 33)::int, 1), '')
+                       FROM generate_series(1, 10 + floor(random() * 20)::int)),
+                    CASE WHEN random() < 0.30 THEN NULL
+                         ELSE 'https://cdn.foodexpress.ru/review/'
+                              || md5(random()::text || clock_timestamp()::text) || '.jpg'
+                    END,
+                    v_rating
+                );
+            END LOOP;
         END IF;
-
-        v_rating := round((1 + random() * 4)::numeric, 1);
-        v_review_ts := least(
-            v_order_ts + make_interval(hours => 1 + floor(random() * 48)::int),
-            localtimestamp
-        );
-
-        INSERT INTO review (
-            client_id, review_timestamp, entity_id, entity_type,
-            order_id, description, photo_url, rating
-        )
-        VALUES (
-            v_client_ids[v_client_ord],
-            v_review_ts,
-            v_entity_id,
-            v_entity_type,
-            v_uuid,
-            (SELECT string_agg(substr(v_alphabet, 1 + floor(random() * 33)::int, 1), '')
-               FROM generate_series(1, 10 + floor(random() * 20)::int)),
-            CASE WHEN random() < 0.30 THEN NULL
-                 ELSE 'https://cdn.foodexpress.ru/review/'
-                      || md5(random()::text || clock_timestamp()::text) || '.jpg'
-            END,
-            v_rating
-        );
     END LOOP;
 
     -- 7. courier_pay за последние 6 месяцев (BR-10.2, BR-10.7).
-    -- Один проход: months × couriers × orders. Коэффициент месяца — это
+    -- Один проход: months × couriers × orders. Месяц заказа — по
+    -- order_timestamp (как в шаблоне C.8). Коэффициент месяца — это
     -- коэффициент, назначенный в предыдущем месяце по числу доставок
     -- (для первого месяца — начальный 0.10). После генерации
     -- courier.coefficient — коэффициент на следующий месяц.
+    -- Уволенным записи после месяца увольнения не создаются (BR-10.6).
     WITH months AS (
         SELECT generate_series(
             date_trunc('month', localtimestamp) - interval '5 months',
@@ -458,9 +480,11 @@ BEGIN
           LEFT JOIN "order" o
                  ON o.courier_id = c.courier_id
                 AND o.status = 'доставлен'
-                AND o.delivery_timestamp >= m.m
-                AND o.delivery_timestamp < m.m + interval '1 month'
+                AND o.order_timestamp >= m.m
+                AND o.order_timestamp < m.m + interval '1 month'
          WHERE c.courier_id = ANY (v_all_courier_ids)
+           AND (c.dismissal_date IS NULL
+                OR m.m <= date_trunc('month', c.dismissal_date))
          GROUP BY c.courier_id, m.m
     ),
     ranked AS (
